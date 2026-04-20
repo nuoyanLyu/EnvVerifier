@@ -143,6 +143,19 @@ def _generate_server_code(config: Config, db_path: str) -> str:
     return config.temp_server_path
 
 
+def _save_final_database(db_path: str, output_dir: str) -> None:
+    final_db_path = os.path.join(output_dir, "final.db")
+    if not os.path.exists(db_path):
+        return
+
+    if os.path.exists(final_db_path) and os.path.samefile(db_path, final_db_path):
+        logger.info(f"Final database already saved at {final_db_path}")
+        return
+
+    shutil.copy2(db_path, final_db_path)
+    logger.info(f"Saved final database to {final_db_path}")
+
+
 def run_server(config: Config):
     output_dir = _prepare_server_dir(config)
     db_path = _prepare_database(config, output_dir)
@@ -163,10 +176,7 @@ def run_server(config: Config):
     ret = os.system(f"{sys.executable} {server_code_path} 2>&1 | tee {log_path}")
 
     # After server exits, save final DB snapshot
-    final_db_path = os.path.join(output_dir, "final.db")
-    if os.path.exists(db_path):
-        shutil.copy2(db_path, final_db_path)
-        logger.info(f"Saved final database to {final_db_path}")
+    _save_final_database(db_path, output_dir)
 
     return ret
 

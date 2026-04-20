@@ -179,3 +179,4 @@ agent-world-model/outputs/*
 agent-world-model/AgentWorldModel-1K/*
 agent-world-model/EnvScaler/*
 agent-world-model/plan/*
+agent-world-model/output_mini/*
