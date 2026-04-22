@@ -19,6 +19,7 @@ async def webshop_reward(
     Returns:
         dict: A dictionary containing the reward (float) and output (str) from the environment step. If an error occurs, returns a reward of 0.0 and an error message as output.
     """
+    # breakpoint()
     try:
         result = await env.step("get_reward", task_id)
         return {

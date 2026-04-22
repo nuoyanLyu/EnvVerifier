@@ -8,8 +8,15 @@ markers = [
 ]
 
 [tool.setuptools]
-packages = ["agentfly"]
 package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["agentfly*"]
+
+[tool.setuptools.package-data]
+"agentfly.verl.trainer.config" = ["*.yaml", "*/*.yaml"]
+
 
 [tool.isort]
 profile = "black"

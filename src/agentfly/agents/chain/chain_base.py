@@ -511,6 +511,7 @@ class ChainRollout:
         enable_streaming,
     ):
         """Execute a tool call with optional streaming support."""
+        # breakpoint()
         tool_name = tool_call["function"]["name"]
         tool_input = tool_call["function"]["arguments"]
 

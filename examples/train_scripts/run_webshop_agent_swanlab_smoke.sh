@@ -14,6 +14,12 @@
 #   ls -lh /data1/lvnuoyan/dataset/webshop/webshop_goals_*.json
 #   PRINT_HYDRA_CONFIG=1 bash examples/train_scripts/run_webshop_agent_swanlab_smoke.sh
 #
+# VSCode/Ray distributed debugger mode:
+#   RAY_START_MODE=ray_init HEAD_NODE_IP=127.0.0.1 TOTAL_TRAINING_STEPS=1 \
+#     TRAIN_BATCH_SIZE=1 VAL_BATCH_SIZE=1 PPO_MINI_BATCH_SIZE=1 NUM_CHAINS=1 \
+#     SAVE_FREQ=1 TEST_FREQ=1 N_GPUS=1 CUDA_VISIBLE_DEVICES=0 \
+#     bash examples/train_scripts/run_webshop_agent_swanlab_smoke.sh
+#
 # Minimal server smoke run:
 #   TOTAL_TRAINING_STEPS=1 TRAIN_BATCH_SIZE=2 VAL_BATCH_SIZE=2 NUM_CHAINS=1 SAVE_FREQ=1 \
 #     bash examples/train_scripts/run_webshop_agent_swanlab_smoke.sh
@@ -24,6 +30,7 @@ set -x
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export RAY_USAGE_STATS_ENABLED="${RAY_USAGE_STATS_ENABLED:-0}"
 
 MODEL_PATH="${MODEL_PATH:-/data1/lvnuoyan/llm_model/Qwen2.5-1.5B-Instruct}"
 DATA_DIR="${DATA_DIR:-/data1/lvnuoyan/dataset/AgentFly-Train}"
@@ -34,7 +41,12 @@ CKPT_DIR="${CKPT_DIR:-/data1/lvnuoyan/llm_model/agentfly/webshop}"
 N_GPUS="${N_GPUS:-2}"
 RAY_NUM_CPUS="${RAY_NUM_CPUS:-64}"
 RAY_PORT="${RAY_PORT:-6379}"
-RESTART_RAY="${RESTART_RAY:-1}"
+RAY_DASHBOARD_HOST="${RAY_DASHBOARD_HOST:-0.0.0.0}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+RAY_TEMP_DIR="${RAY_TEMP_DIR:-/tmp/ray-agentfly-smoke-${RAY_PORT}}"
+RAY_START_MODE="${RAY_START_MODE:-ray_init}"
+START_RAY_HEAD="${START_RAY_HEAD:-1}"
+STOP_RAY_BEFORE_START="${STOP_RAY_BEFORE_START:-0}"
 PRINT_HYDRA_CONFIG="${PRINT_HYDRA_CONFIG:-0}"
 
 SAVE_FREQ="${SAVE_FREQ:-20}"
@@ -93,24 +105,51 @@ fi
 
 mkdir -p "${CKPT_DIR}" "${SWANLAB_LOG_DIR}"
 
-head_node_ip="${HEAD_NODE_IP:-$(hostname --ip-address | awk '{print $1}')}"
+head_node_ip="${HEAD_NODE_IP:-127.0.0.1}"
 
 hydra_config_args=()
 if [[ "${PRINT_HYDRA_CONFIG}" == "1" ]]; then
     hydra_config_args=(--cfg job)
 fi
 
-if [[ "${RESTART_RAY}" == "1" && "${PRINT_HYDRA_CONFIG}" != "1" ]]; then
-    ray stop || true
-    rm -rf /tmp/ray/ray_current_cluster
+ray_init_args=()
+if [[ "${RAY_START_MODE}" == "ray_init" ]]; then
+    unset RAY_ADDRESS
+    ray_init_args=(
+        "ray_kwargs.ray_init.num_cpus=${RAY_NUM_CPUS}"
+        "+ray_kwargs.ray_init.num_gpus=${N_GPUS}"
+        "+ray_kwargs.ray_init.include_dashboard=True"
+        "+ray_kwargs.ray_init.dashboard_host=${RAY_DASHBOARD_HOST}"
+        "+ray_kwargs.ray_init.dashboard_port=${RAY_DASHBOARD_PORT}"
+        "+ray_kwargs.ray_init._temp_dir=${RAY_TEMP_DIR}"
+    )
+elif [[ "${RAY_START_MODE}" == "external" ]]; then
+    unset RAY_ADDRESS
+else
+    echo "Invalid RAY_START_MODE=${RAY_START_MODE}. Use 'external' or 'ray_init'." >&2
+    exit 1
+fi
+
+if [[ "${RAY_START_MODE}" == "external" && "${START_RAY_HEAD}" == "1" && "${PRINT_HYDRA_CONFIG}" != "1" ]]; then
+    if [[ "${STOP_RAY_BEFORE_START}" == "1" ]]; then
+        ray stop || true
+    fi
     ray start --head \
         --node-ip-address="${head_node_ip}" \
         --port="${RAY_PORT}" \
         --num-cpus="${RAY_NUM_CPUS}" \
-        --num-gpus="${N_GPUS}"
+        --num-gpus="${N_GPUS}" \
+        --dashboard-host="${RAY_DASHBOARD_HOST}" \
+        --dashboard-port="${RAY_DASHBOARD_PORT}" \
+        --temp-dir="${RAY_TEMP_DIR}" \
+        --disable-usage-stats
 fi
 
-python -m agentfly.cli train "${hydra_config_args[@]}" \
+if [[ "${RAY_START_MODE}" == "external" ]]; then
+    export RAY_ADDRESS="${head_node_ip}:${RAY_PORT}"
+fi
+
+python -m agentfly.cli train "${hydra_config_args[@]}" "${ray_init_args[@]}" \
     algorithm.adv_estimator="${ADV_ESTIMATOR}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
     data.train_files="${TRAIN_DATASET}" \
@@ -161,5 +200,4 @@ python -m agentfly.cli train "${hydra_config_args[@]}" \
     trainer.resume_mode="${RESUME_MODE}" \
     trainer.default_local_dir="${CKPT_DIR}" \
     trainer.total_training_steps="${TOTAL_TRAINING_STEPS}" \
-    trainer.val_before_train=False \
-    ray_kwargs.ray_init.num_cpus="${RAY_NUM_CPUS}"
+    trainer.val_before_train=False

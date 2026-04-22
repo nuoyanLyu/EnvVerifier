@@ -35,6 +35,7 @@ async def webshop_browser(action: str, value: str, env: WebAgentTextEnv):
     Returns:
         str: The observation from the environment after performing the action, or an error message if the action is invalid or an exception occurs.
     """
+    # breakpoint()
     try:
         if action == "search":
             observation = await env.step(f"search[{value}]")

@@ -180,3 +180,6 @@ agent-world-model/AgentWorldModel-1K/*
 agent-world-model/EnvScaler/*
 agent-world-model/plan/*
 agent-world-model/output_mini/*
+
+# my_test
+my_test/*
