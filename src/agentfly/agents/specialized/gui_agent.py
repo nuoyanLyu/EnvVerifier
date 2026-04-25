@@ -84,7 +84,7 @@ class GUIAgent(BaseAgent):
     #     # Otherwise use parent's initialization
     #     return super()._init_llm_engine(model_name_or_path, backend)
 
-    def parse(self, responses: List[str], tools: List[Any]) -> List[Dict[str, Any]]:
+    def parse(self, responses: List[str], tools: List[Any] | None = None, **kwargs) -> List[Dict[str, Any]]:
         """
         Parse model responses into structured messages.
 

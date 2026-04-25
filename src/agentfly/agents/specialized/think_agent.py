@@ -125,7 +125,7 @@ class ThinkAgent(BaseAgent):
             **kwargs,
         )
 
-    def parse(self, responses: List[str], tools: List[Any]) -> Tuple[dict, int, int]:
+    def parse(self, responses: List[str], tools: List[Any] | None = None, **kwargs) -> Tuple[dict, int, int]:
         thinking_answer_tool_calls = [
             parse_thinking_response(response) for response in responses
         ]

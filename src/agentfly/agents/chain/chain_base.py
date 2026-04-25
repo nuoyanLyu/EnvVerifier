@@ -233,8 +233,10 @@ class ChainRollout:
         Monitor.ensure_started()
         self.reset()
 
+        # 抽取消息
         messages_list = MessagesList.from_data(messages)
         chains, first_nodes = self.initialize_chains(messages_list, num_chains)
+        # 从工具中解析schema，得到工具列表的描述信息
         tool_schemas = [tool.schema for tool in self.tools]
 
         done_q = asyncio.Queue()
@@ -445,14 +447,17 @@ class ChainRollout:
                 )
 
                 # Parse response
-                new_msg = self.parse([full_response])
+                new_msg = self.parse([full_response], tools=tools)
+                # new_msg = self.parse([full_response], )
                 return new_msg[0]
             else:
                 # Fallback to non-streaming generation
                 responses = await self.generate_async(
                     [current_node.messages.messages], tools=tools, **generation_config
                 )
-                new_msg = self.parse(responses)
+                # new_msg = self.parse(responses)
+                new_msg = self.parse(responses, tools=tools)
+
 
                 # Emit a single chunk event for the full response
                 full_response = new_msg[0].get("content", "")
@@ -497,7 +502,8 @@ class ChainRollout:
             responses = await self.generate_async(
                 [current_node.messages.messages], tools=tools, **generation_config
             )
-            new_msg = self.parse(responses)
+            # new_msg = self.parse(responses)
+            new_msg = self.parse(responses, tools=tools)
             return new_msg[0]
 
     async def _execute_tool_call(

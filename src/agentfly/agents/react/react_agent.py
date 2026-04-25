@@ -110,7 +110,7 @@ class ReactAgent(BaseAgent):
             **kwargs,
         )
 
-    def parse(self, responses: List[str]) -> List[Dict]:
+    def parse(self, responses: List[str], tools=None, **kwargs) -> List[Dict]:
         """
         Generates an assistant message compatible with tool-calling.
         Returns:

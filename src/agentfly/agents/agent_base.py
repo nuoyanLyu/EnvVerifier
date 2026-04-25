@@ -454,7 +454,7 @@ class BaseAgent(ChainRollout, ABC):
                 f"The last message role must be assistant or tool, but got {last_message_role}"
             )
 
-    def parse(self, responses: List[str]) -> List[Dict]:
+    def parse(self, responses: List[str], tools=None, **kwargs) -> List[Dict]:
         """
         This method is used to define the interaction logic of the agent. It can be used to parse the tool call from the response.
         If tool_parser is provided, it will use the vLLM tool parser by default. Otherwise, subclasses should override this method.

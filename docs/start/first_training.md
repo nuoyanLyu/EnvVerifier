@@ -117,18 +117,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     critic.model.path=$model \
     critic.ppo_mini_batch_size=${mini_batch_size} \
-    critic.ppo_micro_batch_size_per_gpu=2 \
-    algorithm.kl_ctrl.kl_coef=$kl_coef \
-    trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
-    trainer.project_name=$project_name \
-    trainer.experiment_name=${experiment_name} \
-    trainer.n_gpus_per_node=1 \
-    trainer.nnodes=1 \
-    trainer.save_freq=50 \
-    trainer.test_freq=10 \
-    trainer.total_training_steps=$total_training_steps \
-    trainer.val_before_train=False
+
 ```
 
 **3. Run Training**

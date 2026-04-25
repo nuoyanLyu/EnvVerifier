@@ -48,7 +48,8 @@ class OpenAIAgent(BaseAgent):
         return responses
 
     def parse(
-        self, responses: Union[Dict[str, List], List[str]], tools: List[Any], **args
+        self, responses: Union[Dict[str, List], List[str]], tools: List[Any] | None = None, **kwargs,
+        # tools: List[Any], **args
     ) -> List[Dict]:
         """
         Parse responses into the correct message format.
