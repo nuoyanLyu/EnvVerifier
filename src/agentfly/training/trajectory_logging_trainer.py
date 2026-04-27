@@ -12,10 +12,42 @@ from .trajectory_logging import ValidationTrajectoryLogger
 class TrajectoryLoggingRayPPOTrainer(RayPPOTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._install_swanlab_log_filter()
         self.validation_trajectory_logger = ValidationTrajectoryLogger(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+
+    def _install_swanlab_log_filter(self) -> None:
+        trainer_loggers = self.config.trainer.logger
+        if "swanlab" not in trainer_loggers:
+            return
+
+        try:
+            import swanlab
+        except ImportError:
+            return
+
+        if getattr(swanlab, "_agentfly_log_filter_installed", False):
+            return
+
+        original_log = swanlab.log
+        filtered_metric_keys = {
+            "training/global_step",
+            "training/epoch",
+        }
+
+        def filtered_log(data=None, *args, **kwargs):
+            if isinstance(data, dict):
+                data = {
+                    key: value for key, value in data.items() if key not in filtered_metric_keys
+                }
+                if not data:
+                    return None
+            return original_log(data, *args, **kwargs)
+
+        swanlab.log = filtered_log
+        swanlab._agentfly_log_filter_installed = True
 
     @staticmethod
     def _extract_message_text(message: dict) -> str:

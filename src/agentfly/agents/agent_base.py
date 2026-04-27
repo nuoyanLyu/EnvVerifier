@@ -198,6 +198,7 @@ class BaseAgent(ChainRollout, ABC):
         else:
             # TODO: Support other streaming modes
             raise ValueError(f"Streaming mode {streaming} is not supported.")
+        self._system_prompt_printed = False
 
         # Initialize tool parser
         self.tool_parser = tool_parser
@@ -333,6 +334,36 @@ class BaseAgent(ChainRollout, ABC):
     def _postprocess_backends(self):
         self.llm_engine.postprocess()
 
+    def _maybe_print_system_prompt(self, processed_messages: List[Dict]) -> None:
+        if self._system_prompt_printed:
+            return
+
+        system_prompts = []
+        for message_item in processed_messages:
+            turns = message_item.get("messages", [])
+            if not turns:
+                continue
+            first_turn = turns[0]
+            if first_turn.get("role") != "system":
+                continue
+            prompt_parts = first_turn.get("content", [])
+            prompt_text = "\n".join(
+                part.get("text", "") for part in prompt_parts if isinstance(part, dict) and part.get("type") == "text"
+            ).strip()
+            if prompt_text and prompt_text not in system_prompts:
+                system_prompts.append(prompt_text)
+
+        if not system_prompts:
+            return
+
+        print("===== Agent System Prompt =====")
+        for idx, prompt_text in enumerate(system_prompts, start=1):
+            if len(system_prompts) > 1:
+                print(f"[System Prompt {idx}]")
+            print(prompt_text)
+        print("===== End Agent System Prompt =====")
+        self._system_prompt_printed = True
+
     def _initialize_monitor(self, monitors: List[str]) -> None:
         for monitor in monitors:
             if monitor == "local":
@@ -369,6 +400,7 @@ class BaseAgent(ChainRollout, ABC):
 
         """
         processed_messages = self._preprocess_messages(messages)
+        self._maybe_print_system_prompt(processed_messages)
         self._preprocess_backends()
 
         await self.run_async(
