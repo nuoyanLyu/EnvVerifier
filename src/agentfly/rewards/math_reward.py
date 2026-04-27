@@ -612,7 +612,7 @@ def parse_thinking_response(response: str):
 @reward(name="math_equal_reward_think")
 def math_equal_reward_think(
     final_response: str, answer: str, trajectory: List[Dict]
-) -> float:
+) -> dict[str, float]:
     """
     This reward function is used to reward the agent for using thinking and tool calling. The reward contains two parts:
     format: if there is <think> in the response, and the agent has called the tool, then the reward is 1.0 if the answer is correct, otherwise 0.1. if there is no <think> or the agent has not called the tool, then the reward is 0.0.
@@ -635,13 +635,15 @@ def math_equal_reward_think(
             extracted_thinking, extracted_answer = parse_thinking_response(content)
             if extracted_thinking is None:
                 all_have_thinking = False
-
-    if not all_have_thinking or not has_called_tool:
+    # 如果不全是有thinking，或者没有调用工具，直接reward=0？感觉并不合理
+    # 需要全部都有think
+    if not all_have_thinking: #  or not has_called_tool:
         return {
             "reward": 0.0,
             "acc": 0.0,
         }
-
+    # 答案对了就给分数，不强制调用工具——search R1等的结论
+    # 不确定这样是否会让模型完全不调用工具
     answer_correct = symbolic_math_equal(final_response, answer)
     if answer_correct:
         return {
@@ -649,6 +651,8 @@ def math_equal_reward_think(
             "acc": 1.0,
         }
     else:
+        # 答案错误但是有think
+        # 可能可以加上答案错误但是调用工具的进一步的奖励，鼓励调用工具，可能可以
         return {
             "reward": 0.1,
             "acc": 0.0,

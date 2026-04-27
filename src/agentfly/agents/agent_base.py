@@ -86,6 +86,14 @@ class BaseAgent(ChainRollout, ABC):
         local_cache_dir: str = None,
         tool_parser: Optional[Any] = None,
         tool_parser_name: Optional[str] = None,
+        chain_diagnostics_enabled: bool = False,
+        chain_diagnostics_mode: str = "key_stages",
+        chain_diagnostics_payload_chars: int = 256,
+        chain_generation_timeout_s: Optional[float] = None,
+        chain_generation_max_retries: int = 0,
+        chain_tool_timeout_s: Optional[float] = None,
+        chain_tool_max_retries: int = 0,
+        chain_retry_backoff_s: float = 1.0,
         **kwargs,  # To pass other unused arguments
     ):
         """
@@ -116,6 +124,14 @@ class BaseAgent(ChainRollout, ABC):
             local_cache_dir,
             tool_parser,
             tool_parser_name,
+            chain_diagnostics_enabled,
+            chain_diagnostics_mode,
+            chain_diagnostics_payload_chars,
+            chain_generation_timeout_s,
+            chain_generation_max_retries,
+            chain_tool_timeout_s,
+            chain_tool_max_retries,
+            chain_retry_backoff_s,
         )
 
         self.debug = debug
@@ -128,6 +144,16 @@ class BaseAgent(ChainRollout, ABC):
             system_prompt = system_prompt.replace("\\n", "\n")
         self.system_prompt = system_prompt
         self.model_name_or_path = model_name_or_path
+
+        self.chain_diagnostics_enabled = chain_diagnostics_enabled
+        self.chain_diagnostics_mode = chain_diagnostics_mode
+        self.chain_diagnostics_payload_chars = chain_diagnostics_payload_chars
+        self.chain_generation_timeout_s = chain_generation_timeout_s
+        self.chain_generation_max_retries = chain_generation_max_retries
+        self.chain_tool_timeout_s = chain_tool_timeout_s
+        self.chain_tool_max_retries = chain_tool_max_retries
+        self.chain_retry_backoff_s = chain_retry_backoff_s
+
 
         # Handle backend configuration
         if backend_config is None:
@@ -204,11 +230,36 @@ class BaseAgent(ChainRollout, ABC):
         local_cache_dir,
         tool_parser,
         tool_parser_name,
+        chain_diagnostics_enabled,
+        chain_diagnostics_mode,
+        chain_diagnostics_payload_chars,
+        chain_generation_timeout_s,
+        chain_generation_max_retries,
+        chain_tool_timeout_s,
+        chain_tool_max_retries,
+        chain_retry_backoff_s,
     ):
         if backend == "client":
             assert template is None, (
                 "For client backend, we do not support chat template. Set the template when deploying the model."
             )
+        if chain_diagnostics_mode not in ["key_stages", "errors_only", "verbose"]:
+            raise ValueError(
+                "chain_diagnostics_mode must be one of: key_stages, errors_only, verbose."
+            )
+        if chain_diagnostics_payload_chars < 0:
+            raise ValueError("chain_diagnostics_payload_chars must be non-negative.")
+        if chain_generation_timeout_s is not None and chain_generation_timeout_s < 0:
+            raise ValueError("chain_generation_timeout_s must be non-negative.")
+        if chain_generation_max_retries < 0:
+            raise ValueError("chain_generation_max_retries must be non-negative.")
+        if chain_tool_timeout_s is not None and chain_tool_timeout_s < 0:
+            raise ValueError("chain_tool_timeout_s must be non-negative.")
+        if chain_tool_max_retries < 0:
+            raise ValueError("chain_tool_max_retries must be non-negative.")
+        if chain_retry_backoff_s < 0:
+            raise ValueError("chain_retry_backoff_s must be non-negative.")
+
         if backend == "async_vllm":
             assert template is not None, (
                 "For async vllm backend, chat template is required."

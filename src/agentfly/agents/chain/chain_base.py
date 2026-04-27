@@ -158,6 +158,167 @@ class ChainRollout:
         self.chains = []
         self.current_nodes = {}
 
+    def _diag_mode(self) -> str:
+        return getattr(self, "chain_diagnostics_mode", "key_stages")
+
+    def _diag_enabled_for(self, event_kind: str) -> bool:
+        if not getattr(self, "chain_diagnostics_enabled", False):
+            return False
+        mode = self._diag_mode()
+        if mode == "verbose":
+            return True
+        if mode == "key_stages":
+            return True
+        if mode == "errors_only":
+            return event_kind in {"timeout", "retry", "failure"}
+        return False
+
+    def _truncate_for_log(self, value: Any) -> str:
+        payload_chars = getattr(self, "chain_diagnostics_payload_chars", 256)
+        text = serialize_for_json(value)
+        if len(text) <= payload_chars:
+            return text
+        return f"{text[:payload_chars]}...(len={len(text)})"
+
+    def _message_summary_for_log(self, messages: List[Dict[str, Any]]) -> str:
+        if not messages:
+            return "[]"
+        last_message = messages[-1]
+        return self._truncate_for_log(
+            {
+                "role": last_message.get("role"),
+                "content": last_message.get("content"),
+                "tool_calls": last_message.get("tool_calls"),
+                "tool_name": last_message.get("tool_name"),
+            }
+        )
+
+    def _diag_log(
+        self,
+        event: str,
+        *,
+        event_kind: str = "stage",
+        chain_id: Optional[str] = None,
+        group_id: Optional[str] = None,
+        depth: Optional[int] = None,
+        tool_name: Optional[str] = None,
+        attempt: Optional[int] = None,
+        elapsed_s: Optional[float] = None,
+        payload: Any = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self._diag_enabled_for(event_kind):
+            return
+
+        fields = [f"event={event}"]
+        if chain_id is not None:
+            fields.append(f"chain_id={chain_id}")
+        if group_id is not None:
+            fields.append(f"group_id={group_id}")
+        if depth is not None:
+            fields.append(f"depth={depth}")
+        if tool_name is not None:
+            fields.append(f"tool={tool_name}")
+        if attempt is not None:
+            fields.append(f"attempt={attempt}")
+        if elapsed_s is not None:
+            fields.append(f"elapsed_s={elapsed_s:.2f}")
+        if extra:
+            for key, value in extra.items():
+                fields.append(f"{key}={serialize_for_json(value)}")
+        if payload is not None and self._diag_mode() in {"key_stages", "verbose"}:
+            fields.append(f"payload={self._truncate_for_log(payload)}")
+
+        logger.info("[ChainDiagnostics] %s", " ".join(fields))
+
+    async def _run_with_timeout_retries(
+        self,
+        operation_name: str,
+        chain_id: str,
+        group_id: Optional[str],
+        depth: int,
+        func,
+        *,
+        timeout_s: Optional[float],
+        max_retries: int,
+        payload: Any = None,
+        tool_name: Optional[str] = None,
+    ):
+        attempts = max_retries + 1
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            started_at = time.time()
+            self._diag_log(
+                f"{operation_name}_start",
+                chain_id=chain_id,
+                group_id=group_id,
+                depth=depth,
+                tool_name=tool_name,
+                attempt=attempt,
+                payload=payload,
+            )
+            try:
+                if timeout_s is not None and timeout_s > 0:
+                    result = await asyncio.wait_for(func(), timeout=timeout_s)
+                else:
+                    result = await func()
+                self._diag_log(
+                    f"{operation_name}_success",
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    tool_name=tool_name,
+                    attempt=attempt,
+                    elapsed_s=time.time() - started_at,
+                    payload=result if self._diag_mode() == "verbose" else None,
+                )
+                return result
+            except asyncio.TimeoutError as exc:
+                last_error = exc
+                self._diag_log(
+                    f"{operation_name}_timeout",
+                    event_kind="timeout",
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    tool_name=tool_name,
+                    attempt=attempt,
+                    elapsed_s=time.time() - started_at,
+                    payload=payload,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                self._diag_log(
+                    f"{operation_name}_failure",
+                    event_kind="failure",
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    tool_name=tool_name,
+                    attempt=attempt,
+                    elapsed_s=time.time() - started_at,
+                    extra={"error": repr(exc)},
+                )
+                raise
+
+            if attempt < attempts:
+                self._diag_log(
+                    f"{operation_name}_retry",
+                    event_kind="retry",
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    tool_name=tool_name,
+                    attempt=attempt + 1,
+                    extra={"backoff_s": getattr(self, "chain_retry_backoff_s", 1.0)},
+                )
+                backoff_s = getattr(self, "chain_retry_backoff_s", 1.0)
+                if backoff_s > 0:
+                    await asyncio.sleep(backoff_s)
+
+        raise last_error
+
+
     @property
     def timing_data(self):
         return self.timer.timing_data
@@ -284,20 +445,63 @@ class ChainRollout:
         current_node = first_node
         depth = 0
         have_set_tools = False
+        group_id = chain.info.get("group_id")
+
+        self._diag_log(
+            "chain_start",
+            chain_id=chain_id,
+            group_id=group_id,
+            depth=depth,
+            payload=self._message_summary_for_log(first_node.messages.messages),
+        )
 
         while not current_node.is_terminal and depth < max_turns:
             newest_messages = current_node.messages.copy()
 
             if not current_node.is_terminal:
                 # Generate response
-                new_msg = await self._generate_response(
-                    current_node=current_node,
-                    tools=tools,
-                    depth=depth,
-                    chain_id=chain_id,
-                    generation_config=generation_config,
-                    enable_streaming=enable_streaming,
-                )
+                # new_msg = await self._generate_response(
+                #     current_node=current_node,
+                #     tools=tools,
+                #     depth=depth,
+                #     chain_id=chain_id,
+                #     generation_config=generation_config,
+                #     enable_streaming=enable_streaming,
+                # )
+                try:
+                    new_msg = await self._generate_response(
+                        current_node=current_node,
+                        tools=tools,
+                        depth=depth,
+                        chain_id=chain_id,
+                        group_id=group_id,
+                        generation_config=generation_config,
+                        enable_streaming=enable_streaming,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    timeout_s = getattr(self, "chain_generation_timeout_s", None)
+                    if isinstance(exc, asyncio.TimeoutError):
+                        failure_text = (
+                            f"generation timed out after {timeout_s:.2f}s"
+                            if timeout_s is not None
+                            else "generation timed out"
+                        )
+                    else:
+                        failure_text = f"generation failed: {type(exc).__name__}: {exc}"
+                    new_msg = {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": failure_text}],
+                        "tool_calls": [],
+                        "status": "terminal",
+                    }
+                    self._diag_log(
+                        "generation_final_failure",
+                        event_kind="failure",
+                        chain_id=chain_id,
+                        group_id=group_id,
+                        depth=depth,
+                        extra={"error": failure_text},
+                    )
 
                 newest_messages.append(new_msg)
                 thought_node = chain.add_node(
@@ -317,15 +521,56 @@ class ChainRollout:
             # Handle tool calls
             if current_node.messages[-1].get("tool_calls"):
                 for tool_call in current_node.messages[-1]["tool_calls"]:
-                    result = await self._execute_tool_call(
-                        tool_call,
-                        newest_messages,
-                        chain,
-                        chain_id,
-                        depth,
-                        have_set_tools,
-                        enable_streaming,
-                    )
+                    # result = await self._execute_tool_call(
+                    #     tool_call,
+                    #     newest_messages,
+                    #     chain,
+                    #     chain_id,
+                    #     depth,
+                    #     have_set_tools,
+                    #     enable_streaming,
+                    # )
+                    try:
+                        result = await self._execute_tool_call(
+                            tool_call,
+                            newest_messages,
+                            chain,
+                            chain_id,
+                            group_id,
+                            depth,
+                            have_set_tools,
+                            enable_streaming,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        timeout_s = getattr(self, "chain_tool_timeout_s", None)
+                        tool_name = tool_call["function"]["name"]
+                        tool_input = tool_call["function"]["arguments"]
+                        if isinstance(exc, asyncio.TimeoutError):
+                            failure_text = (
+                                f"tool '{tool_name}' timed out after {timeout_s:.2f}s"
+                                if timeout_s is not None
+                                else f"tool '{tool_name}' timed out"
+                            )
+                        else:
+                            failure_text = (
+                                f"tool '{tool_name}' failed: {type(exc).__name__}: {exc}"
+                            )
+                        result = {
+                            "name": tool_name,
+                            "arguments": tool_input,
+                            "observation": failure_text,
+                            "status": "terminal",
+                        }
+                        self._diag_log(
+                            "tool_final_failure",
+                            event_kind="failure",
+                            chain_id=chain_id,
+                            group_id=group_id,
+                            depth=depth,
+                            tool_name=tool_name,
+                            extra={"error": failure_text},
+                        )
+
                     have_set_tools = True
 
                     # Create action input node
@@ -374,12 +619,179 @@ class ChainRollout:
 
         self.finished_chains_count += 1
         message_info = chain.info
+        self._diag_log(
+            "chain_end",
+            chain_id=chain_id,
+            group_id=group_id,
+            depth=depth,
+            payload=self._message_summary_for_log(current_node.messages.messages),
+            extra={"reward": chain.info.get("reward")},
+        )
         self.monitor_chain(trajectory=current_node.messages.messages, info=message_info)
 
     async def _generate_response(
-        self, current_node, tools, depth, chain_id, generation_config, enable_streaming
+        self,
+        current_node,
+        tools,
+        depth,
+        chain_id,
+        group_id,
+        generation_config,
+        enable_streaming,
     ):
         """Generate response with optional streaming support."""
+        payload = self._message_summary_for_log(current_node.messages.messages)
+
+        async def run_once():
+            return await self._generate_response_once(
+                current_node=current_node,
+                tools=tools,
+                depth=depth,
+                chain_id=chain_id,
+                generation_config=generation_config,
+                enable_streaming=enable_streaming,
+            )
+
+        return await self._run_with_timeout_retries(
+            "generation",
+            chain_id,
+            group_id,
+            depth,
+            run_once,
+            timeout_s=getattr(self, "chain_generation_timeout_s", None),
+            max_retries=getattr(self, "chain_generation_max_retries", 0),
+            payload=payload,
+        )
+        # if enable_streaming:
+        #     # Emit generation start event
+        #     await self.streaming_manager.emit_event(
+        #         StreamEvent(
+        #             event_type=StreamEventType.LLM_GENERATION_START,
+        #             chain_id=chain_id,
+        #             timestamp=time.time(),
+        #             data={"depth": depth},
+        #             step=depth,
+        #             depth=depth,
+        #         )
+        #     )
+
+        #     # Check if we have streaming capabilities
+        #     has_streaming = False
+        #     if hasattr(self, "generate_streaming"):
+        #         has_streaming = True
+        #     elif hasattr(self, "llm_engine") and hasattr(
+        #         self.llm_engine, "generate_streaming"
+        #     ):
+        #         has_streaming = True
+
+        #         # Create a wrapper to use the LLM engine's streaming
+        #         async def generate_streaming_wrapper(messages_list, **kwargs):
+        #             async for chunk in self.llm_engine.generate_streaming(
+        #                 messages_list, **kwargs
+        #             ):
+        #                 yield chunk
+
+        #         self.generate_streaming = generate_streaming_wrapper
+
+        #     if has_streaming:
+        #         # Collect full response from streaming
+        #         full_response = ""
+        #         async for chunk in self.generate_streaming(
+        #             [current_node.messages.messages], tools=tools, **generation_config
+        #         ):
+        #             await self.streaming_manager.emit_event(
+        #                 StreamEvent(
+        #                     event_type=StreamEventType.LLM_GENERATION_CHUNK,
+        #                     chain_id=chain_id,
+        #                     timestamp=time.time(),
+        #                     data={"content": chunk},
+        #                     step=depth,
+        #                     depth=depth,
+        #                 )
+        #             )
+        #             # chunk is the whole generated text
+        #             full_response = chunk
+
+        #         logger.debug(
+        #             f"[ChainRollout._generate_response] full_response: {full_response}"
+        #         )
+
+        #         # Emit generation end event
+        #         await self.streaming_manager.emit_event(
+        #             StreamEvent(
+        #                 event_type=StreamEventType.LLM_GENERATION_END,
+        #                 chain_id=chain_id,
+        #                 timestamp=time.time(),
+        #                 data={"full_response": full_response},
+        #                 step=depth,
+        #                 depth=depth,
+        #             )
+        #         )
+
+        #         # Parse response
+        #         new_msg = self.parse([full_response], tools=tools)
+        #         # new_msg = self.parse([full_response], )
+        #         return new_msg[0]
+        #     else:
+        #         # Fallback to non-streaming generation
+        #         responses = await self.generate_async(
+        #             [current_node.messages.messages], tools=tools, **generation_config
+        #         )
+        #         # new_msg = self.parse(responses)
+        #         new_msg = self.parse(responses, tools=tools)
+
+
+        #         # Emit a single chunk event for the full response
+        #         full_response = new_msg[0].get("content", "")
+        #         if isinstance(full_response, list) and len(full_response) > 0:
+        #             # Handle case where content is a list of content blocks
+        #             if (
+        #                 isinstance(full_response[0], dict)
+        #                 and "text" in full_response[0]
+        #             ):
+        #                 full_response = full_response[0]["text"]
+        #             else:
+        #                 full_response = str(full_response)
+        #         elif not isinstance(full_response, str):
+        #             full_response = str(full_response)
+
+        #         await self.streaming_manager.emit_event(
+        #             StreamEvent(
+        #                 event_type=StreamEventType.LLM_GENERATION_CHUNK,
+        #                 chain_id=chain_id,
+        #                 timestamp=time.time(),
+        #                 data={"content": full_response},
+        #                 step=depth,
+        #                 depth=depth,
+        #             )
+        #         )
+
+        #         # Emit generation end event
+        #         await self.streaming_manager.emit_event(
+        #             StreamEvent(
+        #                 event_type=StreamEventType.LLM_GENERATION_END,
+        #                 chain_id=chain_id,
+        #                 timestamp=time.time(),
+        #                 data={"full_response": full_response},
+        #                 step=depth,
+        #                 depth=depth,
+        #             )
+        #         )
+
+        #         return new_msg[0]
+        # else:
+        #     # Non-streaming generation
+        #     responses = await self.generate_async(
+        #         [current_node.messages.messages], tools=tools, **generation_config
+        #     )
+        #     # new_msg = self.parse(responses)
+        #     new_msg = self.parse(responses, tools=tools)
+        #     return new_msg[0]
+
+    async def _generate_response_once(
+        self, current_node, tools, depth, chain_id, generation_config, enable_streaming
+    ):
+        """Generate a single response attempt with optional streaming support."""
         if enable_streaming:
             # Emit generation start event
             await self.streaming_manager.emit_event(
@@ -448,16 +860,13 @@ class ChainRollout:
 
                 # Parse response
                 new_msg = self.parse([full_response], tools=tools)
-                # new_msg = self.parse([full_response], )
                 return new_msg[0]
             else:
                 # Fallback to non-streaming generation
                 responses = await self.generate_async(
                     [current_node.messages.messages], tools=tools, **generation_config
                 )
-                # new_msg = self.parse(responses)
                 new_msg = self.parse(responses, tools=tools)
-
 
                 # Emit a single chunk event for the full response
                 full_response = new_msg[0].get("content", "")
@@ -502,9 +911,9 @@ class ChainRollout:
             responses = await self.generate_async(
                 [current_node.messages.messages], tools=tools, **generation_config
             )
-            # new_msg = self.parse(responses)
             new_msg = self.parse(responses, tools=tools)
             return new_msg[0]
+
 
     async def _execute_tool_call(
         self,
@@ -512,6 +921,7 @@ class ChainRollout:
         newest_messages,
         chain,
         chain_id,
+        group_id,
         depth,
         have_set_tools,
         enable_streaming,
@@ -527,8 +937,24 @@ class ChainRollout:
             have_set_tools = True
 
         # Execute tool call
-        result = await submit_tool_call(
-            tool_name, tool_input, id=chain_id, allowed_tool_names=self.tool_names
+        # result = await submit_tool_call(
+        #     tool_name, tool_input, id=chain_id, allowed_tool_names=self.tool_names
+        # )
+        async def run_once():
+            return await submit_tool_call(
+                tool_name, tool_input, id=chain_id, allowed_tool_names=self.tool_names
+            )
+
+        result = await self._run_with_timeout_retries(
+            "tool",
+            chain_id,
+            group_id,
+            depth,
+            run_once,
+            timeout_s=getattr(self, "chain_tool_timeout_s", None),
+            max_retries=getattr(self, "chain_tool_max_retries", 0),
+            payload={"arguments": tool_input},
+            tool_name=tool_name,
         )
 
         if enable_streaming:
