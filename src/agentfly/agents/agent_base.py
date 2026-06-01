@@ -142,6 +142,7 @@ class BaseAgent(ChainRollout, ABC):
         self.tool_names = [tool.name for tool in tools]
         if isinstance(system_prompt, str):
             system_prompt = system_prompt.replace("\\n", "\n")
+            print('Set system_prompt', system_prompt)
         self.system_prompt = system_prompt
         self.model_name_or_path = model_name_or_path
 

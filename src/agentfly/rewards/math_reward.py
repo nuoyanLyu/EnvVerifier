@@ -1,3 +1,4 @@
+import json
 import re
 import sys
 from itertools import islice, zip_longest
@@ -609,6 +610,102 @@ def parse_thinking_response(response: str):
     return thinking, answer
 
 
+def _assistant_content_to_text(msg: Dict) -> str:
+    if isinstance(msg["content"], str):
+        return msg["content"]
+    if isinstance(msg["content"], list):
+        return msg["content"][-1]["text"]
+    raise ValueError(f"Invalid content type: {type(msg['content'])}")
+
+
+def extract_think_block(text: str) -> str | None:
+    matches = re.findall(r"<think>(.*?)</think>", text, re.DOTALL)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def extract_answer_block(text: str) -> str | None:
+    matches = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def extract_tool_call_block(text: str) -> str | None:
+    matches = re.findall(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def is_valid_tool_turn(text: str) -> bool:
+    if extract_think_block(text) is None:
+        return False
+    if extract_answer_block(text) is not None:
+        return False
+
+    tool_call = extract_tool_call_block(text)
+    if tool_call is None:
+        return False
+
+    if re.fullmatch(r"\s*<think>.*?</think>\s*<tool_call>.*?</tool_call>\s*", text, re.DOTALL) is None:
+        return False
+
+    try:
+        tool_call_json = json.loads(tool_call.strip())
+    except Exception:
+        return False
+
+    return isinstance(tool_call_json, dict) and "name" in tool_call_json and "arguments" in tool_call_json
+
+
+def is_valid_final_answer_turn(text: str) -> bool:
+    if extract_think_block(text) is None:
+        return False
+    if extract_tool_call_block(text) is not None:
+        return False
+    if extract_answer_block(text) is None:
+        return False
+    return re.fullmatch(r"\s*<think>.*?</think>\s*<answer>.*?</answer>\s*", text, re.DOTALL) is not None
+
+
+def all_assistant_turns_have_valid_think_format(trajectory: List[Dict]) -> bool:
+    assistant_messages = [msg for msg in trajectory if msg["role"] == "assistant"]
+    if not assistant_messages:
+        return False
+
+    for idx, msg in enumerate(assistant_messages):
+        content = _assistant_content_to_text(msg)
+        is_final = idx == len(assistant_messages) - 1
+        if is_final:
+            if not (is_valid_final_answer_turn(content) or is_valid_tool_turn(content)):
+                return False
+        elif not is_valid_tool_turn(content):
+            return False
+    return True
+
+
+def _analyze_think_reward_trajectory(trajectory: List[Dict]) -> dict[str, str | bool | None]:
+    assistant_messages = [msg for msg in trajectory if msg["role"] == "assistant"]
+    if not assistant_messages:
+        return {
+            "format_valid": False,
+            "final_answer": None,
+            "final_has_answer": False,
+            "has_tool_usage": any(msg["role"] == "tool" for msg in trajectory),
+        }
+
+    final_content = _assistant_content_to_text(assistant_messages[-1])
+    final_answer = extract_answer_block(final_content) if is_valid_final_answer_turn(final_content) else None
+    return {
+        "format_valid": all_assistant_turns_have_valid_think_format(trajectory),
+        "final_answer": final_answer,
+        "final_has_answer": final_answer is not None,
+        "has_tool_usage": any(msg["role"] == "tool" for msg in trajectory),
+    }
+
+
 @reward(name="math_equal_reward_think")
 def math_equal_reward_think(
     final_response: str, answer: str, trajectory: List[Dict]
@@ -657,6 +754,74 @@ def math_equal_reward_think(
             "reward": 0.1,
             "acc": 0.0,
         }
+
+
+@reward(name="math_equal_reward_think_tool")
+def math_equal_reward_think_tool(
+    final_response: str, answer: str, trajectory: List[Dict]
+) -> dict[str, float]:
+    analysis = _analyze_think_reward_trajectory(trajectory)
+    if not analysis["format_valid"]:
+        return {
+            "reward": 0.0,
+            "acc": 0.0,
+        }
+
+    if analysis["final_has_answer"]:
+        answer_correct = symbolic_math_equal(answer, analysis["final_answer"])
+        if analysis["has_tool_usage"] and answer_correct:
+            return {
+                "reward": 1.0,
+                "acc": 1.0,
+            }
+        if analysis["has_tool_usage"] and not answer_correct:
+            return {
+                "reward": 0.1,
+                "acc": 0.0,
+            }
+        return {
+            "reward": 0.0,
+            "acc": 1.0 if answer_correct else 0.0,
+        }
+
+    if analysis["has_tool_usage"]:
+        return {
+            "reward": 0.1,
+            "acc": 0.0,
+        }
+    return {
+        "reward": 0.0,
+        "acc": 0.0,
+    }
+
+
+@reward(name="math_equal_reward_think_no_tool_bonus")
+def math_equal_reward_think_no_tool_bonus(
+    final_response: str, answer: str, trajectory: List[Dict]
+) -> dict[str, float]:
+    analysis = _analyze_think_reward_trajectory(trajectory)
+    if not analysis["format_valid"]:
+        return {
+            "reward": 0.0,
+            "acc": 0.0,
+        }
+
+    if analysis["final_has_answer"]:
+        answer_correct = symbolic_math_equal(answer, analysis["final_answer"])
+        if answer_correct:
+            return {
+                "reward": 1.0,
+                "acc": 1.0,
+            }
+        return {
+            "reward": 0.1,
+            "acc": 0.0,
+        }
+
+    return {
+        "reward": 0.1,
+        "acc": 0.0,
+    }
 
 
 @reward(name="math_string_equal_reward_tool")

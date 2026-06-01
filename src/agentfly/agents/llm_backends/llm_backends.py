@@ -281,6 +281,12 @@ class AsyncVLLMBackend(LLMBackend):
             sampling_params["max_tokens"] = kwargs.get("max_tokens")
         sampling_params = SamplingParams(**sampling_params)
         n = kwargs.get("n", 1)
+    
+        # Flatten list-content to plain strings before passing to chat_bricks.
+        # chain_base stores tool-response content as [{"type": "text", "text": ...}];
+        # HF chat templates (e.g. Qwen3) expect plain str for non-user roles.
+        messages_list = [self._process_messages(messages) for messages in messages_list]
+
 
         tools = kwargs.get("tools", None)
         prompts, vision_inputs = self.apply_chat_template(

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 from collections import defaultdict
 
 import numpy as np
@@ -48,6 +50,66 @@ class TrajectoryLoggingRayPPOTrainer(RayPPOTrainer):
 
         swanlab.log = filtered_log
         swanlab._agentfly_log_filter_installed = True
+
+    def _estimate_bg_run_timeout_s(self) -> float:
+        init_config = self.config.agent.get("init_config", {})
+        max_turns = int(self.config.agent.get("max_turns", 1) or 1)
+
+        generation_timeout_s = float(init_config.get("chain_generation_timeout_s", 0) or 0)
+        generation_retries = int(init_config.get("chain_generation_max_retries", 0) or 0)
+        tool_timeout_s = float(init_config.get("chain_tool_timeout_s", 0) or 0)
+        tool_retries = int(init_config.get("chain_tool_max_retries", 0) or 0)
+        retry_backoff_s = float(init_config.get("chain_retry_backoff_s", 0) or 0)
+
+        generation_attempts = generation_retries + 1
+        tool_attempts = tool_retries + 1
+        retry_wait_budget = retry_backoff_s * (generation_retries + tool_retries)
+        per_turn_budget = (
+            generation_timeout_s * generation_attempts
+            + tool_timeout_s * tool_attempts
+            + retry_wait_budget
+        )
+
+        if per_turn_budget <= 0:
+            return 1800.0
+
+        return max_turns * per_turn_budget + 120.0
+
+    def run_on_bg(self, coro):
+        from concurrent.futures import TimeoutError as FutureTimeoutError
+
+        timeout_s = self._estimate_bg_run_timeout_s()
+        started_at = time.time()
+        print(
+            "[AgentRun] background run start "
+            f"timeout_s={timeout_s:.1f} max_turns={self.config.agent.max_turns} "
+            f"num_chains={self.config.agent.num_chains}",
+            flush=True,
+        )
+
+        future = asyncio.run_coroutine_threadsafe(coro, self.bg_loop)
+        try:
+            result = future.result(timeout=timeout_s)
+            print(
+                f"[AgentRun] background run finished elapsed_s={time.time() - started_at:.2f}",
+                flush=True,
+            )
+            return result
+        except FutureTimeoutError as exc:
+            future.cancel()
+            message = (
+                "[AgentRun] background run timed out "
+                f"after {timeout_s:.1f}s; chain-level timeouts may not have completed cleanly."
+            )
+            print(message, flush=True)
+            raise TimeoutError(message) from exc
+        except Exception as exc:
+            print(
+                "[AgentRun] background run failed "
+                f"elapsed_s={time.time() - started_at:.2f} error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
 
     @staticmethod
     def _extract_message_text(message: dict) -> str:

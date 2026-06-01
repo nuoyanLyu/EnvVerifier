@@ -184,19 +184,16 @@ class Messages:
 
     def set_system_prompt(self, system_prompt: str, enforce: bool = True) -> None:
         assert isinstance(system_prompt, str), "System prompt must be a string."
+        normalized_content = [{"type": "text", "text": system_prompt}]
 
         if "messages" in self._data:
             if self._data["messages"][0]["role"] == "system":
                 if enforce:
-                    self._data["messages"][0]["content"] = [
-                        {"type": "text", "text": system_prompt}
-                    ]
+                    self._data["messages"][0]["content"] = normalized_content
                 else:
                     raise MessagesValidationError("System prompt already exists.")
             else:
-                self._data["messages"].insert(
-                    0, {"role": "system", "content": system_prompt}
-                )
+                self._data["messages"].insert(0, {"role": "system", "content": normalized_content})
 
     def __len__(self) -> int:
         return len(self._data["messages"])

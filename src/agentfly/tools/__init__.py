@@ -6,17 +6,38 @@ from .src.alfworld.tools import (
     alfworld_reset,
     alfworld_step,
 )
+from .src.awm.tools import awm_call_tool, awm_list_tools
 from .src.calculate.tools import calculator
-from .src.chess.tools import chess_get_legal_moves, chess_get_state, chess_move
 from .src.code.tools import CodeInterpreterTool, code_interpreter
 from .src.react.tools import answer_math, answer_qa
-from .src.scienceworld.tools import scienceworld_explorer
-from .src.search.async_dense_retriever import asyncdense_retrieve
-from .src.search.dense_retriever import dense_retrieve
-from .src.search.google_search import google_search_serper
 from .src.ui.tools import pyautogui_code_generator
-from .src.webshop.tools import webshop_browser
 from .tool_base import BaseTool
+
+try:  # pragma: no cover - optional tools may depend on extra packages
+    from .src.chess.tools import chess_get_legal_moves, chess_get_state, chess_move
+except Exception:  # noqa: BLE001
+    chess_get_legal_moves = None
+    chess_get_state = None
+    chess_move = None
+
+try:  # pragma: no cover
+    from .src.scienceworld.tools import scienceworld_explorer
+except Exception:  # noqa: BLE001
+    scienceworld_explorer = None
+
+try:  # pragma: no cover
+    from .src.search.async_dense_retriever import asyncdense_retrieve
+    from .src.search.dense_retriever import dense_retrieve
+    from .src.search.google_search import google_search_serper
+except Exception:  # noqa: BLE001
+    asyncdense_retrieve = None
+    dense_retrieve = None
+    google_search_serper = None
+
+try:  # pragma: no cover
+    from .src.webshop.tools import webshop_browser
+except Exception:  # noqa: BLE001
+    webshop_browser = None
 
 
 @tool()
@@ -38,6 +59,8 @@ __all__ = [
     "alfworld_get_task_objective",
     "alfworld_get_admissible_commands",
     "alfworld_reset",
+    "awm_list_tools",
+    "awm_call_tool",
     "calculator",
     "google_search_serper",
     "dense_retrieve",

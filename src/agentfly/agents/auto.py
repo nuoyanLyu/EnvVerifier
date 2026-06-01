@@ -1,3 +1,5 @@
+
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
 from ..rewards.reward_base import get_reward_from_name
@@ -24,6 +26,49 @@ class AutoAgent:
     """
 
     AGENT_MAPPING = {}
+    DEFAULT_SYSTEM_PROMPT_CONFIGS = {
+        "think": Path(__file__).resolve().parents[1] / "configs" / "prompts" / "system_prompt_think.yaml",
+    }
+
+    @classmethod
+    def _load_system_prompt_from_yaml(cls, prompt_config_path: str | Path) -> str:
+        try:
+            from omegaconf import OmegaConf
+        except ImportError as exc:
+            raise ImportError(
+                "Loading system prompt from yaml requires omegaconf. Use the training environment with hydra/omegaconf installed."
+            ) from exc
+
+        path = Path(prompt_config_path).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+
+        if not path.exists():
+            raise FileNotFoundError(f"System prompt config file not found: {path}")
+
+        prompt_config = OmegaConf.load(path)
+        system_prompt = OmegaConf.select(prompt_config, "system_prompt")
+        if not isinstance(system_prompt, str) or not system_prompt.strip():
+            raise ValueError(f"Missing non-empty 'system_prompt' in config file: {path}")
+
+        return system_prompt
+
+    @classmethod
+    def _resolve_system_prompt(cls, config: Dict[str, Any]) -> str | None:
+        explicit_system_prompt = config.get("system_prompt")
+        if explicit_system_prompt:
+            return explicit_system_prompt
+
+        agent_type = str(config["agent_type"]).lower()
+        prompt_config_path = config.get("system_prompt_config_path")
+        if not prompt_config_path:
+            prompt_config_path = cls.DEFAULT_SYSTEM_PROMPT_CONFIGS.get(agent_type)
+
+        if not prompt_config_path:
+            return None
+
+        return cls._load_system_prompt_from_yaml(prompt_config_path)
+
 
     @classmethod
     def register_agent(cls, agent_type: str, agent_class: Type[BaseAgent]) -> None:
@@ -51,6 +96,7 @@ class AutoAgent:
             ValueError: If the agent type is not registered
         """
         agent_type = agent_type.lower()
+
 
         if agent_type not in cls.AGENT_MAPPING:
             available_types = list(cls.AGENT_MAPPING.keys())
@@ -103,6 +149,8 @@ class AutoAgent:
 
         agent_type = config["agent_type"]
         agent_kwargs.pop("agent_type")
+        agent_kwargs.pop("system_prompt_config_path", None)
+
         tools = get_tools_from_names(config["tools"])
         agent_class = cls._get_agent_class(agent_type)
         reward_name = config.get("reward_name")
@@ -114,6 +162,10 @@ class AutoAgent:
 
         agent_kwargs["tools"] = tools
         agent_kwargs["reward_fn"] = reward_fn
+        resolved_system_prompt = cls._resolve_system_prompt(config)
+        if resolved_system_prompt is not None:
+            agent_kwargs["system_prompt"] = resolved_system_prompt
+
 
         if "use_agent" in agent_kwargs:
             agent_kwargs.pop("use_agent")

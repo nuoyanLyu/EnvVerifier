@@ -2,6 +2,11 @@ import asyncio
 import inspect
 import json
 import logging
+import multiprocessing
+import queue
+import sys
+import time
+import traceback
 from typing import Any, Callable, List, Optional
 
 from ..envs.env_base import BaseEnv
@@ -9,6 +14,159 @@ from ..envs.manager.env_manager import EnvironmentManager
 from .utils.schema import extract_signatures, parse_docstring, validate_schema
 
 logger = logging.getLogger(__name__)
+SUBPROCESS_POLL_INTERVAL_S = 0.05
+SUBPROCESS_TERMINATE_GRACE_S = 0.5
+
+
+def _emit_tool_diag(
+    diag_hook: Optional[Callable[..., None]], event: str, **kwargs
+) -> None:
+    if diag_hook is None:
+        return
+    try:
+        diag_hook(event, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("tool diag hook failed for %s: %r", event, exc)
+
+
+def _get_sync_tool_mp_context() -> multiprocessing.context.BaseContext:
+    available_methods = multiprocessing.get_all_start_methods()
+    if sys.platform != "win32" and "fork" in available_methods:
+        return multiprocessing.get_context("fork")
+    return multiprocessing.get_context("spawn")
+
+
+def _run_sync_tool_in_subprocess_worker(
+    tool_name: str, tool_input_json: dict, result_queue: multiprocessing.Queue
+) -> None:
+    try:
+        import agentfly.tools  # noqa: F401
+
+        from .registry import TOOL_REGISTRY
+
+        tool_obj = TOOL_REGISTRY.get(tool_name)
+        if tool_obj is None:
+            raise AssertionError(f"Tool {tool_name} not found")
+
+        result = tool_obj(**tool_input_json)
+        if inspect.iscoroutine(result):
+            raise RuntimeError(
+                f"Tool {tool_name} unexpectedly returned a coroutine in sync subprocess mode."
+            )
+
+        result_queue.put({"ok": True, "result": result})
+    except Exception as exc:  # noqa: BLE001
+        result_queue.put(
+            {
+                "ok": False,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+async def _terminate_sync_tool_process(
+    process: multiprocessing.Process,
+    diag_hook: Optional[Callable[..., None]],
+    *,
+    reason: str,
+) -> None:
+    if not process.is_alive():
+        return
+
+    process.terminate()
+    _emit_tool_diag(
+        diag_hook,
+        "tool_subprocess_terminated",
+        pid=process.pid,
+        signal="terminate",
+        reason=reason,
+    )
+
+    deadline = time.monotonic() + SUBPROCESS_TERMINATE_GRACE_S
+    while process.is_alive() and time.monotonic() < deadline:
+        await asyncio.sleep(SUBPROCESS_POLL_INTERVAL_S)
+
+    if process.is_alive():
+        process.kill()
+        _emit_tool_diag(
+            diag_hook,
+            "tool_subprocess_terminated",
+            pid=process.pid,
+            signal="kill",
+            reason=reason,
+        )
+        while process.is_alive():
+            await asyncio.sleep(SUBPROCESS_POLL_INTERVAL_S)
+
+
+async def _run_sync_tool_in_subprocess(
+    tool_name: str,
+    tool_input_json: dict,
+    *,
+    diag_hook: Optional[Callable[..., None]] = None,
+) -> dict:
+    ctx = _get_sync_tool_mp_context()
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(
+        target=_run_sync_tool_in_subprocess_worker,
+        args=(tool_name, tool_input_json, result_queue),
+        daemon=True,
+    )
+    process.start()
+    _emit_tool_diag(diag_hook, "tool_subprocess_start", pid=process.pid)
+
+    try:
+        while process.is_alive():
+            await asyncio.sleep(SUBPROCESS_POLL_INTERVAL_S)
+        if not process.is_alive():
+            process.join(timeout=0)
+        queue_message = None
+        queue_deadline = time.monotonic() + SUBPROCESS_TERMINATE_GRACE_S
+        while queue_message is None and time.monotonic() < queue_deadline:
+            try:
+                queue_message = result_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(SUBPROCESS_POLL_INTERVAL_S)
+
+        _emit_tool_diag(
+            diag_hook,
+            "tool_subprocess_exit",
+            pid=process.pid,
+            exitcode=process.exitcode,
+            has_result=queue_message is not None,
+        )
+
+        if queue_message is None:
+            raise RuntimeError(
+                f"Tool subprocess for {tool_name} exited without returning a result."
+            )
+
+        if not queue_message.get("ok", False):
+            error_type = queue_message.get("error_type", "RuntimeError")
+            error_message = queue_message.get("error", "unknown error")
+            raise RuntimeError(
+                f"Tool subprocess for {tool_name} failed with {error_type}: {error_message}"
+            )
+
+        return queue_message["result"]
+    except asyncio.CancelledError:
+        await _terminate_sync_tool_process(process, diag_hook, reason="cancelled")
+        if not process.is_alive():
+            process.join(timeout=0)
+        raise
+    finally:
+        if hasattr(result_queue, "close"):
+            result_queue.close()
+        if hasattr(result_queue, "join_thread"):
+            result_queue.join_thread()
+        if hasattr(process, "close"):
+            try:
+                process.close()
+            except ValueError:
+                # Process still running; the cancellation path above is responsible for termination.
+                pass
 
 
 class BaseTool:
@@ -501,6 +659,7 @@ async def submit_tool_call(
     tool_input: str,
     id: str = None,
     allowed_tool_names: List[str] = None,
+    diag_hook: Optional[Callable[..., None]] = None,
 ) -> dict:
     """
     Submit a tool call to the environment.
@@ -548,14 +707,20 @@ async def submit_tool_call(
     if id is not None and tool_obj.is_stateful:
         tool_input_json["id"] = id
 
-    # Call tool_obj without await first to check if it returns a coroutine
-    result = tool_obj(**tool_input_json)
+    is_async_call = bool(getattr(tool_obj, "_is_async_call", False))
+    exec_mode = "async_direct" if is_async_call else "sync_subprocess"
+    _emit_tool_diag(diag_hook, "tool_dispatch", exec_mode=exec_mode)
 
-    # Check if result is a coroutine and await it if needed
-    if inspect.iscoroutine(result):
-        # We're already in an async function, so we can directly await the coroutine
-        result = await result
-    # If result is not a coroutine, it's already the final value, use it directly
+    if is_async_call:
+        result = tool_obj(**tool_input_json)
+        if inspect.iscoroutine(result):
+            result = await result
+    else:
+        result = await _run_sync_tool_in_subprocess(
+            tool_name,
+            tool_input_json,
+            diag_hook=diag_hook,
+        )
 
     return result
 

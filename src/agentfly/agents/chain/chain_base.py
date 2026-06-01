@@ -180,6 +180,19 @@ class ChainRollout:
             return text
         return f"{text[:payload_chars]}...(len={len(text)})"
 
+    def _extract_text_from_content(self, content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                else:
+                    parts.append(serialize_for_json(item))
+            return "\n".join(part for part in parts if part)
+        return serialize_for_json(content)
+
     def _message_summary_for_log(self, messages: List[Dict[str, Any]]) -> str:
         if not messages:
             return "[]"
@@ -229,7 +242,9 @@ class ChainRollout:
         if payload is not None and self._diag_mode() in {"key_stages", "verbose"}:
             fields.append(f"payload={self._truncate_for_log(payload)}")
 
-        logger.info("[ChainDiagnostics] %s", " ".join(fields))
+        message = "[ChainDiagnostics] " + " ".join(fields)
+        logger.info("%s", message)
+        print(message, flush=True)
 
     async def _run_with_timeout_retries(
         self,
@@ -502,6 +517,18 @@ class ChainRollout:
                         depth=depth,
                         extra={"error": failure_text},
                     )
+
+                self._diag_log(
+                    "generation_parsed",
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    extra={
+                        "status": new_msg.get("status", "unknown"),
+                        "tool_calls": len(new_msg.get("tool_calls", [])),
+                    },
+                    payload=self._extract_text_from_content(new_msg.get("content", "")),
+                )
 
                 newest_messages.append(new_msg)
                 thought_node = chain.add_node(
@@ -933,7 +960,21 @@ class ChainRollout:
 
         # Set up tools if needed
         if not have_set_tools:
+            self._diag_log(
+                "tool_prepare_env_start",
+                chain_id=chain_id,
+                group_id=group_id,
+                depth=depth,
+                tool_name=tool_name,
+            )
             await self.set_tools(chain_id, chain.info)
+            self._diag_log(
+                "tool_prepare_env_success",
+                chain_id=chain_id,
+                group_id=group_id,
+                depth=depth,
+                tool_name=tool_name,
+            )
             have_set_tools = True
 
         # Execute tool call
@@ -941,8 +982,26 @@ class ChainRollout:
         #     tool_name, tool_input, id=chain_id, allowed_tool_names=self.tool_names
         # )
         async def run_once():
+            def tool_diag_hook(event: str, **kwargs) -> None:
+                payload = kwargs.pop("payload", None)
+                event_kind = kwargs.pop("event_kind", None)
+                self._diag_log(
+                    event,
+                    event_kind=event_kind,
+                    chain_id=chain_id,
+                    group_id=group_id,
+                    depth=depth,
+                    tool_name=tool_name,
+                    payload=payload,
+                    extra=kwargs or None,
+                )
+
             return await submit_tool_call(
-                tool_name, tool_input, id=chain_id, allowed_tool_names=self.tool_names
+                tool_name,
+                tool_input,
+                id=chain_id,
+                allowed_tool_names=self.tool_names,
+                diag_hook=tool_diag_hook,
             )
 
         result = await self._run_with_timeout_retries(
@@ -955,6 +1014,16 @@ class ChainRollout:
             max_retries=getattr(self, "chain_tool_max_retries", 0),
             payload={"arguments": tool_input},
             tool_name=tool_name,
+        )
+
+        self._diag_log(
+            "tool_result",
+            chain_id=chain_id,
+            group_id=group_id,
+            depth=depth,
+            tool_name=tool_name,
+            extra={"status": result.get("status", "unknown")},
+            payload={"observation": result.get("observation", "")},
         )
 
         if enable_streaming:
