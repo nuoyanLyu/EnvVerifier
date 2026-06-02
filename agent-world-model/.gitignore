@@ -1,0 +1,7 @@
+my_test/*
+api-keys.json
+
+# untrack data files
+outputs/*
+AgentWorldModel-1K/*
+EnvScaler/*

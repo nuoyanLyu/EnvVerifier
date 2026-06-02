@@ -180,6 +180,8 @@ agent-world-model/AgentWorldModel-1K/*
 agent-world-model/EnvScaler/*
 agent-world-model/plan/*
 agent-world-model/output_mini/*
+# exclude agent world model uv env
+!agent-world-model/uv.lock
 
 # my_test
 my_test/*
