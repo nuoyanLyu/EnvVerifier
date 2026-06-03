@@ -162,11 +162,15 @@ def run_server(config: Config):
     logger.info(f"Server log will be saved to {log_path}")
     ret = os.system(f"{sys.executable} {server_code_path} 2>&1 | tee {log_path}")
 
-    # After server exits, save final DB snapshot
+    # After server exits, save final DB snapshot. The working DB is already
+    # output_dir/final.db when db_path was created from schema/sample inputs.
     final_db_path = os.path.join(output_dir, "final.db")
     if os.path.exists(db_path):
-        shutil.copy2(db_path, final_db_path)
-        logger.info(f"Saved final database to {final_db_path}")
+        if os.path.exists(final_db_path) and os.path.samefile(db_path, final_db_path):
+            logger.info(f"Final database already saved at {final_db_path}")
+        else:
+            shutil.copy2(db_path, final_db_path)
+            logger.info(f"Saved final database to {final_db_path}")
 
     return ret
 
