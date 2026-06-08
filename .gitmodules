@@ -1,3 +1,6 @@
 [submodule "verl"]
 	path = verl
 	url = https://github.com/Agent-One-Lab/verl.git
+[submodule "OpenEnv"]
+	path = OpenEnv
+	url = https://github.com/huggingface/OpenEnv.git
