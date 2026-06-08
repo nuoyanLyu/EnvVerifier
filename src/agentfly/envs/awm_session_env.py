@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import shutil
 import subprocess
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .env_base import BaseEnv
+from .mcp_client import MCPToolExecutor
 from ..utils.awm import (
     DEFAULT_AWM_DB_SCHEMA_PATH,
     DEFAULT_AWM_ENVS_PATH,
@@ -27,6 +29,7 @@ from ..utils.awm import (
     format_mcp_tools,
     parse_jsonish_arguments,
     resolve_path,
+    run_awm_verifier,
 )
 
 
@@ -42,6 +45,10 @@ class AWMSessionConfig:
     db_schema_path: Path
     sample_path: Path
     session_root: Path
+    mcp_url: str | None = None
+    launch_mode: str = "external"
+    initial_db_path: Path | None = None
+    final_db_path: Path | None = None
     server_timeout_s: float = 60.0
     tool_timeout_s: float = 60.0
 
@@ -61,18 +68,39 @@ class AWMSessionRuntime:
         self.final_db_path: Path | None = None
         self.db_file_path: Path | None = None
         self.verifier_entry: dict[str, Any] | None = None
-        self._mcp = None
+        self._mcp: MCPToolExecutor | None = None
         self._tools_cache: list[dict[str, Any]] | None = None
         self._tools_text_cache: str | None = None
 
     async def start(self) -> None:
-        ensure_awm_importable()
-        from awm.core.agent import MCPToolExecutor
-        from awm.core.server import (
-            Config as ServerConfig,
-            _prepare_database,
-            start_server_process,
+        self.verifier_entry = find_verifier_entry(
+            self.config.verifier_path,
+            self.config.scenario,
+            self.config.task_id,
         )
+
+        launch_mode = self.config.launch_mode.lower()
+        if launch_mode == "external":
+            await self._start_external()
+        elif launch_mode == "managed":
+            await self._start_managed()
+        else:
+            raise ValueError("awm_launch_mode must be 'external' or 'managed'")
+
+    async def _start_external(self) -> None:
+        if not self.config.mcp_url:
+            raise RuntimeError(
+                "External AWM launch mode requires awm_mcp_url or AGENTFLY_AWM_MCP_URL."
+            )
+        self.mcp_url = self.config.mcp_url
+        self.initial_db_path = self.config.initial_db_path.resolve() if self.config.initial_db_path else None
+        self.final_db_path = self.config.final_db_path.resolve() if self.config.final_db_path else None
+        self.db_file_path = self.final_db_path
+        self._mcp = MCPToolExecutor(self.mcp_url, timeout=self.config.tool_timeout_s)
+
+    async def _start_managed(self) -> None:
+        ensure_awm_importable()
+        from awm.core.server import Config as ServerConfig, _prepare_database, start_server_process
         from awm.tools import async_wait_for_server, get_random_available_port
 
         server_cfg = ServerConfig(
@@ -86,11 +114,6 @@ class AWMSessionRuntime:
         self.db_file_path = db_file_path
         self.initial_db_path = (self.output_dir / "initial.db").resolve()
         self.final_db_path = db_file_path
-        self.verifier_entry = find_verifier_entry(
-            self.config.verifier_path,
-            self.config.scenario,
-            self.config.task_id,
-        )
 
         port = get_random_available_port()
         self.server_proc = start_server_process(
@@ -141,8 +164,14 @@ class AWMSessionRuntime:
                 self.server_proc.kill()
                 await asyncio.to_thread(self.server_proc.wait)
         self.server_proc = None
+
+        if self.config.launch_mode.lower() != "managed":
+            return
         if self.db_file_path and self.final_db_path and self.db_file_path.exists():
-            if self.db_file_path != self.final_db_path:
+            same_file = False
+            with contextlib.suppress(OSError):
+                same_file = self.db_file_path.resolve().samefile(self.final_db_path.resolve())
+            if not same_file:
                 shutil.copy2(self.db_file_path, self.final_db_path)
 
 
@@ -179,6 +208,18 @@ class AWMSessionEnv(BaseEnv):
         db_schema_path = resolve_path(flattened.get("awm_db_schema_path"), DEFAULT_AWM_DB_SCHEMA_PATH)
         sample_path = resolve_path(flattened.get("awm_sample_path"), DEFAULT_AWM_SAMPLE_PATH)
         session_root = resolve_path(flattened.get("awm_output_root"), self.session_root)
+        launch_mode = str(flattened.get("awm_launch_mode", "external")).lower()
+        mcp_url = flattened.get("awm_mcp_url") or os.getenv("AGENTFLY_AWM_MCP_URL")
+
+        server_output_dir_raw = flattened.get("awm_server_output_dir")
+        initial_db_raw = flattened.get("awm_initial_db_path")
+        final_db_raw = flattened.get("awm_final_db_path")
+        if server_output_dir_raw:
+            server_output_dir = resolve_path(server_output_dir_raw, server_output_dir_raw)
+            initial_db_raw = initial_db_raw or str(server_output_dir / "initial.db")
+            final_db_raw = final_db_raw or str(server_output_dir / "final.db")
+        initial_db_path = resolve_path(initial_db_raw, initial_db_raw) if initial_db_raw else None
+        final_db_path = resolve_path(final_db_raw, final_db_raw) if final_db_raw else None
         session_root.mkdir(parents=True, exist_ok=True)
 
         task = flattened.get("task")
@@ -196,6 +237,10 @@ class AWMSessionEnv(BaseEnv):
             db_schema_path=db_schema_path,
             sample_path=sample_path,
             session_root=session_root,
+            mcp_url=str(mcp_url) if mcp_url else None,
+            launch_mode=launch_mode,
+            initial_db_path=initial_db_path,
+            final_db_path=final_db_path,
             server_timeout_s=float(flattened.get("awm_server_timeout_s", 60.0)),
             tool_timeout_s=float(flattened.get("awm_tool_timeout_s", 60.0)),
         )
@@ -206,7 +251,7 @@ class AWMSessionEnv(BaseEnv):
         self.current_config = config
         self.runtime = runtime
         return (
-            f"Started AWM session for scenario={config.scenario}, task_id={config.task_id}. "
+            f"Started AWM session for scenario={config.scenario}, task_id={config.task_id}, launch_mode={config.launch_mode}. "
             f"MCP URL: {runtime.mcp_url}"
         )
 
@@ -238,10 +283,7 @@ class AWMSessionEnv(BaseEnv):
         if self.runtime.initial_db_path is None or self.runtime.final_db_path is None:
             return "judge_error", {"error": "Database snapshots are unavailable"}
 
-        ensure_awm_importable()
-        from awm.core.verify import run_verifier
-
-        return run_verifier(
+        return run_awm_verifier(
             self.runtime.verifier_entry,
             self.current_config.verifier_mode,
             str(self.runtime.initial_db_path),

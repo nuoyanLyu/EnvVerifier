@@ -58,6 +58,7 @@ dependencies = [
     "diffusers",
     "google-genai",
     "chess",
+    "mcp",
 ]
 
 [project.optional-dependencies]

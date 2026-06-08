@@ -26,9 +26,79 @@ class AutoAgent:
     """
 
     AGENT_MAPPING = {}
+    PROMPTS_DIR = Path(__file__).resolve().parents[1] / "configs" / "prompts"
     DEFAULT_SYSTEM_PROMPT_CONFIGS = {
-        "think": Path(__file__).resolve().parents[1] / "configs" / "prompts" / "system_prompt_think.yaml",
+        "think": PROMPTS_DIR / "system_prompt_think.yaml",
     }
+    AWM_PROMPT_MODE_CONFIGS = {
+        "no_think": {
+            "agent_type": "hf",
+            "template": "qwen2.5",
+            "tools": ["awm_list_tools", "awm_call_tool"],
+            "tool_parser_name": "awm_xml",
+            "reward_name": "awm_verifier_reward",
+            "system_prompt_config_path": PROMPTS_DIR / "system_prompt_awm.yaml",
+        },
+        "think": {
+            "agent_type": "hf",
+            "template": "qwen2.5",
+            "tools": ["awm_list_tools", "awm_call_tool"],
+            "tool_parser_name": "awm_xml",
+            "reward_name": "awm_verifier_reward_think",
+            "system_prompt_config_path": PROMPTS_DIR / "system_prompt_awm_think.yaml",
+        },
+    }
+    _AWM_PROMPT_MODE_ALIASES = {
+        "native": "no_think",
+        "no-think": "no_think",
+        "nothink": "no_think",
+        "no_think": "no_think",
+        "think": "think",
+    }
+    _DEFAULT_AWM_REPLACEMENTS = {
+        "agent_type": {"code"},
+        "tool_parser_name": {"hermes"},
+        "reward_name": {"qa_f1_reward"},
+    }
+    _DEFAULT_TOOLS = ["google_search", "answer"]
+
+    @classmethod
+    def _normalize_awm_prompt_mode(cls, mode: Any) -> str | None:
+        if mode is None or mode == "":
+            return None
+        normalized = str(mode).strip().lower()
+        prompt_mode = cls._AWM_PROMPT_MODE_ALIASES.get(normalized)
+        if prompt_mode is None:
+            valid_modes = ", ".join(sorted(cls._AWM_PROMPT_MODE_CONFIGS))
+            raise ValueError(f"Unknown awm_prompt_mode: {mode!r}. Expected one of: {valid_modes}")
+        return prompt_mode
+
+    @classmethod
+    def _should_apply_awm_default(cls, key: str, current_value: Any) -> bool:
+        if current_value is None or current_value == "":
+            return True
+        if key == "tools":
+            try:
+                return list(current_value) == cls._DEFAULT_TOOLS
+            except TypeError:
+                return False
+        default_values = cls._DEFAULT_AWM_REPLACEMENTS.get(key)
+        if default_values is None:
+            return False
+        return str(current_value).lower() in default_values
+
+    @classmethod
+    def _apply_awm_prompt_mode_defaults(cls, config: Dict[str, Any]) -> Dict[str, Any]:
+        updated_config = dict(config)
+        prompt_mode = cls._normalize_awm_prompt_mode(updated_config.get("awm_prompt_mode"))
+        if prompt_mode is None:
+            return updated_config
+
+        for key, value in cls.AWM_PROMPT_MODE_CONFIGS[prompt_mode].items():
+            if cls._should_apply_awm_default(key, updated_config.get(key)):
+                updated_config[key] = value
+        updated_config["awm_prompt_mode"] = prompt_mode
+        return updated_config
 
     @classmethod
     def _load_system_prompt_from_yaml(cls, prompt_config_path: str | Path) -> str:
@@ -55,6 +125,7 @@ class AutoAgent:
 
     @classmethod
     def _resolve_system_prompt(cls, config: Dict[str, Any]) -> str | None:
+        config = cls._apply_awm_prompt_mode_defaults(config)
         explicit_system_prompt = config.get("system_prompt")
         if explicit_system_prompt:
             return explicit_system_prompt
@@ -134,6 +205,8 @@ class AutoAgent:
         if config is None:
             raise ValueError("Config could not be None")
 
+        config = cls._apply_awm_prompt_mode_defaults(config)
+
         # construct a copy for agent_kwargs
         agent_kwargs = {}
         for k, v in config.items():
@@ -150,6 +223,7 @@ class AutoAgent:
         agent_type = config["agent_type"]
         agent_kwargs.pop("agent_type")
         agent_kwargs.pop("system_prompt_config_path", None)
+        agent_kwargs.pop("awm_prompt_mode", None)
 
         tools = get_tools_from_names(config["tools"])
         agent_class = cls._get_agent_class(agent_type)
