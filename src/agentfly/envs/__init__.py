@@ -1,5 +1,6 @@
 from .awm_session_env import AWMSessionEnv
 from .manager import EnvironmentManager, WarmPool, clear_enroot_containers, from_env
+from .openenv_awm_session_env import OpenEnvAWMSessionEnv
 from .python_env import PythonSandboxEnv
 
 try:  # pragma: no cover - optional environments may have extra dependencies
@@ -31,6 +32,7 @@ __all__ = [
     "PythonSandboxEnv",
     "ALFWorldEnv",
     "AWMSessionEnv",
+    "OpenEnvAWMSessionEnv",
     "WebAgentTextEnv",
     "ScienceWorldEnv",
     "RedisEnv",

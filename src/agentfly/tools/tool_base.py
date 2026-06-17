@@ -582,7 +582,7 @@ class BaseTool:
 
         env = cls._envs.pop(id)
         cls._locks.pop(id)
-        await EnvironmentManager.release(env, id=id)
+        await EnvironmentManager.release(env, id=id, finished=success)
 
     @classmethod
     async def set_env(cls, id, env_args=None):
@@ -590,13 +590,25 @@ class BaseTool:
         if not cls.is_stateful:
             return
         await cls._initialize_envs()
-        if id in cls._envs:
-            env = cls._envs[id]
-            await EnvironmentManager.reset(env, env_args=env_args)
-        else:
+        env = cls._envs.get(id)
+        if env is None:
             env = await cls._acquire_env(id)
+        try:
             await EnvironmentManager.reset(env, env_args=env_args)
-            return
+        except Exception:
+            if cls._envs.get(id) is env:
+                cls._envs.pop(id, None)
+                cls._locks.pop(id, None)
+            try:
+                await EnvironmentManager.release(env, id=id, finished=False)
+            except Exception as release_exc:  # noqa: BLE001
+                logger.warning(
+                    "failed to discard broken environment for tool %s and id %s: %r",
+                    cls.name,
+                    id,
+                    release_exc,
+                )
+            raise
 
     @classmethod
     async def release_all(cls):
@@ -670,8 +682,9 @@ async def submit_tool_call(
         allowed_tool_names = list(TOOL_REGISTRY.keys())
 
     if tool_name not in allowed_tool_names:
+        original_tool_name = tool_name
         tool_name = "hallucination_tool"
-        tool_input = {"tool_name": str(tool_name)}
+        tool_input = {"tool_name": str(original_tool_name)}
 
     tool_obj = TOOL_REGISTRY.get(tool_name, None)
     assert tool_obj is not None, f"Tool {tool_name} not found"
@@ -697,6 +710,10 @@ async def submit_tool_call(
         # raise ValueError(f"Invalid tool input: {tool_input}")
         # The input is not string or dict, we take it as invalid input
         tool_input_json = None
+
+    tool_args = getattr(tool_obj, "args", {}) or {}
+    if tool_input_json is None and not tool_args:
+        tool_input_json = {}
 
     if tool_input_json is None:
         tool_name = "invalid_input_tool"

@@ -14,10 +14,19 @@ ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 RAW_TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
 VALID_AWM_TOOL_NAMES = {"list_tools", "call_tool"}
-PARTIAL_SUCCESS_RESULTS = {"partial", "partial_success", "partially_complete", "partially_successful"}
+FORMAT_ERROR_OBSERVATION_PATTERNS = [
+    r"^\s*error\s*:\s*input validation error\b",
+    r"\binvalid[_ -]?args\b",
+    r"\binvalid argument",
+    r"\binvalid parameter",
+    r"\brequired property\b",
+    r"\bmissing required\b",
+    r"\bis not of type\b",
+    r"\bschema\b",
+    r"\bjson decode\b",
+    r"\bunknown tool\b",
+]
 SERVER_ERROR_PATTERNS = [
-    r"^\s*error\s*:",
-    r"\bfailed\b",
     r"\bexception\b",
     r"\btraceback\b",
     r"\btimed out\b",
@@ -28,6 +37,10 @@ SERVER_ERROR_PATTERNS = [
     r"\bbad gateway\b",
     r"\bgateway timeout\b",
     r"\bconnection refused\b",
+    r"\bmcp connection not established\b",
+    r"\bsub-environment is not running\b",
+    r"\bcall reset\(\) first\b",
+    r"\bfailed\b",
 ]
 
 
@@ -87,9 +100,15 @@ def _extract_mcp_tool_names(list_tools_observation: str) -> set[str]:
     return names
 
 
-def _is_error_observation(observation: str) -> bool:
+def _classify_error_observation(observation: str) -> str | None:
     lowered = observation.lower()
-    return any(re.search(pattern, lowered) for pattern in SERVER_ERROR_PATTERNS)
+    if not re.search(r"^\s*error\s*:", lowered):
+        return None
+    if any(re.search(pattern, lowered) for pattern in FORMAT_ERROR_OBSERVATION_PATTERNS):
+        return "format_error"
+    if any(re.search(pattern, lowered) for pattern in SERVER_ERROR_PATTERNS):
+        return "server_error"
+    return "server_error"
 
 
 def _assistant_messages(trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,13 +224,6 @@ def _validate_format_and_server(
             "valid_think": valid_think,
         }
 
-    if any(_is_error_observation(observation) for observation in observations[: len(native_calls)]):
-        return {
-            "classification": "server_error",
-            "reason": "tool_call_error_server_response",
-            "valid_think": valid_think,
-        }
-
     available_mcp_tools = _extract_mcp_tool_names(observations[0]) if observations else set()
     for index, (name, arguments) in enumerate(native_calls):
         if name != "call_tool":
@@ -251,7 +263,29 @@ def _validate_format_and_server(
             "valid_think": valid_think,
         }
 
+    for observation in observations[: len(native_calls)]:
+        error_classification = _classify_error_observation(observation)
+        if error_classification is not None:
+            reason = (
+                "tool_call_format_error_server_response"
+                if error_classification == "format_error"
+                else "tool_call_error_server_response"
+            )
+            return {
+                "classification": error_classification,
+                "reason": reason,
+                "valid_think": valid_think,
+            }
+
     return {"classification": None, "reason": None, "valid_think": valid_think}
+
+
+def awm_early_termination_validator(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
+    return _validate_format_and_server(trajectory, require_think=False)
+
+
+def awm_think_early_termination_validator(trajectory: list[dict[str, Any]]) -> dict[str, Any]:
+    return _validate_format_and_server(trajectory, require_think=True)
 
 
 def _extract_final_answer(final_response: str) -> str | None:
@@ -307,7 +341,6 @@ def _build_reward_payload(
         "tool_call_count": float(tool_call_count),
         "complete": 1.0 if classification == "complete" else 0.0,
         "incomplete": 1.0 if classification == "incomplete" else 0.0,
-        "partial_success": 1.0 if classification == "partial_success" else 0.0,
         "format_error": 1.0 if classification == "format_error" else 0.0,
         "agent_error": 1.0 if classification == "agent_error" else 0.0,
         "server_error": 1.0 if classification == "server_error" else 0.0,
@@ -348,19 +381,21 @@ def _classification_from_verifier(
     normalized_result = str(verifier_result or "").strip().lower()
     if normalized_result == "complete":
         return "complete"
-    if normalized_result in PARTIAL_SUCCESS_RESULTS:
-        return "partial_success"
     if normalized_result == "judge_error":
         return "judge_error"
     return env.classify_trajectory_issue(trajectory) or "incomplete"
 
 
-def _reward_from_classification(classification: str) -> tuple[float, float]:
+def _reward_from_classification(
+    classification: str,
+    *,
+    partial_credit_for_incomplete: bool = False,
+) -> tuple[float, float]:
     if classification == "format_error":
         return -1.0, 0.0
     if classification == "complete":
         return 1.0, 1.0
-    if classification == "partial_success":
+    if classification == "incomplete" and partial_credit_for_incomplete:
         return 0.1, 0.0
     return 0.0, 0.0
 
@@ -437,7 +472,10 @@ async def awm_verifier_reward(
         env=env,
     )
 
-    reward_value, acc = _reward_from_classification(classification)
+    reward_value, acc = _reward_from_classification(
+        classification,
+        partial_credit_for_incomplete=env.current_config is not None and env.current_config.verifier_mode == "sql",
+    )
     return _build_reward_payload(
         classification=classification,
         reward_value=reward_value,
@@ -485,7 +523,10 @@ async def awm_verifier_reward_think(
     if not valid_think:
         classification = "format_error"
 
-    reward_value, acc = _reward_from_classification(classification)
+    reward_value, acc = _reward_from_classification(
+        classification,
+        partial_credit_for_incomplete=env.current_config is not None and env.current_config.verifier_mode == "sql",
+    )
 
     return _build_reward_payload(
         classification=classification,
@@ -495,3 +536,8 @@ async def awm_verifier_reward_think(
         tool_call_count=tool_call_count,
         valid_think=1.0 if valid_think else 0.0,
     )
+
+awm_verifier_reward.early_termination_validator = awm_early_termination_validator
+awm_verifier_reward.early_termination_classifications = {"format_error", "server_error"}
+awm_verifier_reward_think.early_termination_validator = awm_think_early_termination_validator
+awm_verifier_reward_think.early_termination_classifications = {"format_error", "server_error"}

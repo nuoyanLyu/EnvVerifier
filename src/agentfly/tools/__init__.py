@@ -9,6 +9,7 @@ from .src.alfworld.tools import (
 from .src.awm.tools import awm_call_tool, awm_list_tools
 from .src.calculate.tools import calculator
 from .src.code.tools import CodeInterpreterTool, code_interpreter
+from .src.openenv_awm.tools import call_tool, list_tools, openenv_awm_call_tool, openenv_awm_list_tools
 from .src.react.tools import answer_math, answer_qa
 from .src.ui.tools import pyautogui_code_generator
 from .tool_base import BaseTool
@@ -61,6 +62,10 @@ __all__ = [
     "alfworld_reset",
     "awm_list_tools",
     "awm_call_tool",
+    "openenv_awm_list_tools",
+    "openenv_awm_call_tool",
+    "list_tools",
+    "call_tool",
     "calculator",
     "google_search_serper",
     "dense_retrieve",

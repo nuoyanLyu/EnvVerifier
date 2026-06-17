@@ -94,6 +94,8 @@ class BaseAgent(ChainRollout, ABC):
         chain_tool_timeout_s: Optional[float] = None,
         chain_tool_max_retries: int = 0,
         chain_retry_backoff_s: float = 1.0,
+        chain_rollout_max_resample_attempts: Optional[int] = None,
+        chain_rollout_max_infra_failure_ratio: float = 0.5,
         **kwargs,  # To pass other unused arguments
     ):
         """
@@ -132,8 +134,11 @@ class BaseAgent(ChainRollout, ABC):
             chain_tool_timeout_s,
             chain_tool_max_retries,
             chain_retry_backoff_s,
+            chain_rollout_max_resample_attempts,
+            chain_rollout_max_infra_failure_ratio,
         )
 
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
         self.debug = debug
         self.backend = backend
         self.tools = tools
@@ -154,6 +159,8 @@ class BaseAgent(ChainRollout, ABC):
         self.chain_tool_timeout_s = chain_tool_timeout_s
         self.chain_tool_max_retries = chain_tool_max_retries
         self.chain_retry_backoff_s = chain_retry_backoff_s
+        self.chain_rollout_max_resample_attempts = chain_rollout_max_resample_attempts
+        self.chain_rollout_max_infra_failure_ratio = chain_rollout_max_infra_failure_ratio
 
 
         # Handle backend configuration
@@ -240,6 +247,8 @@ class BaseAgent(ChainRollout, ABC):
         chain_tool_timeout_s,
         chain_tool_max_retries,
         chain_retry_backoff_s,
+        chain_rollout_max_resample_attempts,
+        chain_rollout_max_infra_failure_ratio,
     ):
         if backend == "client":
             assert template is None, (
@@ -261,6 +270,13 @@ class BaseAgent(ChainRollout, ABC):
             raise ValueError("chain_tool_max_retries must be non-negative.")
         if chain_retry_backoff_s < 0:
             raise ValueError("chain_retry_backoff_s must be non-negative.")
+        if (
+            chain_rollout_max_resample_attempts is not None
+            and chain_rollout_max_resample_attempts < 0
+        ):
+            raise ValueError("chain_rollout_max_resample_attempts must be non-negative.")
+        if chain_rollout_max_infra_failure_ratio < 0:
+            raise ValueError("chain_rollout_max_infra_failure_ratio must be non-negative.")
 
         if backend == "async_vllm":
             assert template is not None, (

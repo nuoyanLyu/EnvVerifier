@@ -16,6 +16,7 @@ from .reward_base import (
     register_reward,
     reward,
 )
+from .openenv_awm_reward import openenv_awm_verifier_reward, openenv_awm_verifier_reward_think
 
 try:  # pragma: no cover - optional rewards may depend on environment-specific packages
     from .alfworld_reward import alfworld_episode_reward
@@ -57,6 +58,8 @@ __all__ = [
     "reward",
     "awm_verifier_reward",
     "awm_verifier_reward_think",
+    "openenv_awm_verifier_reward",
+    "openenv_awm_verifier_reward_think",
     "qa_f1_reward",
     "qa_f1_reward_tool",
     "math_equal_reward",

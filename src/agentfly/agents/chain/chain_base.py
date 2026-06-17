@@ -23,6 +23,10 @@ from .streaming_observer import ConsoleStreamObserver, StreamEvent, StreamEventT
 logger = logging.getLogger(__name__)
 
 
+class RolloutInfraError(RuntimeError):
+    """Raised when a rollout fails due to infrastructure before agent action."""
+
+
 @dataclass
 class Node:
     messages: Messages
@@ -148,6 +152,7 @@ class ChainRollout:
         self.terminal_status = ["terminal", "finish"]
         self.global_step = 0
         self.finished_chains_count = 0
+        self.aborted_chains_count = 0
         self.monitor_info = defaultdict(list)
 
     def reset(self) -> None:
@@ -157,6 +162,7 @@ class ChainRollout:
         self.success_count: int = 0
         self.chains = []
         self.current_nodes = {}
+        self.aborted_chains_count = 0
 
     def _diag_mode(self) -> str:
         return getattr(self, "chain_diagnostics_mode", "key_stages")
@@ -204,6 +210,53 @@ class ChainRollout:
                 "tool_calls": last_message.get("tool_calls"),
                 "tool_name": last_message.get("tool_name"),
             }
+        )
+
+    def _early_termination_validator(self):
+        reward_fn = getattr(self, "_reward_fn", None)
+        return getattr(reward_fn, "early_termination_validator", None)
+
+    def _early_termination_classifications(self) -> set[str]:
+        reward_fn = getattr(self, "_reward_fn", None)
+        classifications = getattr(
+            reward_fn,
+            "early_termination_classifications",
+            {"format_error", "server_error"},
+        )
+        return set(classifications or [])
+
+    def _apply_reward_early_termination(
+        self,
+        node: Node,
+        *,
+        chain_id: str,
+        group_id: Optional[str],
+        depth: int,
+    ) -> None:
+        validator = self._early_termination_validator()
+        if validator is None:
+            return
+
+        validation = validator(node.messages.messages)
+        if not isinstance(validation, dict):
+            return
+
+        classification = validation.get("classification")
+        if classification not in self._early_termination_classifications():
+            return
+
+        node.is_terminal = True
+        node.observation_code = str(classification)
+        self._diag_log(
+            "reward_early_termination",
+            event_kind="failure" if classification == "format_error" else "stage",
+            chain_id=chain_id,
+            group_id=group_id,
+            depth=depth,
+            extra={
+                "classification": classification,
+                "reason": validation.get("reason"),
+            },
         )
 
     def _diag_log(
@@ -415,30 +468,78 @@ class ChainRollout:
         # 从工具中解析schema，得到工具列表的描述信息
         tool_schemas = [tool.schema for tool in self.tools]
 
-        done_q = asyncio.Queue()
-        tasks = [
-            asyncio.create_task(
-                self._run_single_chain(
-                    cid,
-                    node,
-                    chains[cid],
-                    tool_schemas,
-                    max_turns=max_turns,
-                    generation_config=generation_config,
-                    done_queue=done_q,
-                    enable_streaming=enable_streaming,
-                )
-            )
-            for cid, node in first_nodes.items()
-        ]
+        target_chain_count = len(first_nodes)
+        max_resample_attempts = getattr(self, "chain_rollout_max_resample_attempts", None)
+        if max_resample_attempts is None:
+            max_infra_failure_ratio = getattr(self, "chain_rollout_max_infra_failure_ratio", 0.5)
+            max_resample_attempts = int(target_chain_count * max_infra_failure_ratio + 0.999999)
+        if max_resample_attempts < 0:
+            raise ValueError("chain_rollout_max_resample_attempts must be non-negative.")
 
-        await tqdm_asyncio.gather(*tasks, file=sys.stdout)
+        done_q = asyncio.Queue()
+        aborted_q = asyncio.Queue()
+
+        async def run_candidates(candidate_chains, candidate_first_nodes):
+            tasks = [
+                asyncio.create_task(
+                    self._run_single_chain(
+                        cid,
+                        node,
+                        candidate_chains[cid],
+                        tool_schemas,
+                        max_turns=max_turns,
+                        generation_config=generation_config,
+                        done_queue=done_q,
+                        aborted_queue=aborted_q,
+                        enable_streaming=enable_streaming,
+                    )
+                )
+                for cid, node in candidate_first_nodes.items()
+            ]
+            if tasks:
+                await tqdm_asyncio.gather(*tasks, file=sys.stdout)
+
+        await run_candidates(chains, first_nodes)
+
+        resample_attempts = 0
+        while done_q.qsize() < target_chain_count and resample_attempts < max_resample_attempts:
+            missing = target_chain_count - done_q.qsize()
+            batch_size = min(missing, max_resample_attempts - resample_attempts)
+            resample_attempts += batch_size
+            num_resample_chains = (batch_size + len(messages_list) - 1) // len(messages_list)
+            resample_chains, resample_first_nodes = self.initialize_chains(
+                messages_list,
+                num_resample_chains,
+            )
+            selected_ids = list(resample_first_nodes)[:batch_size]
+            resample_chains = {cid: resample_chains[cid] for cid in selected_ids}
+            resample_first_nodes = {cid: resample_first_nodes[cid] for cid in selected_ids}
+            self._diag_log(
+                "rollout_resample",
+                event_kind="retry",
+                extra={
+                    "missing": missing,
+                    "batch_size": batch_size,
+                    "attempts_used": resample_attempts,
+                    "max_attempts": max_resample_attempts,
+                },
+            )
+            await run_candidates(resample_chains, resample_first_nodes)
 
         self.chains = {}
         while not done_q.empty():
             cid, chain, node = done_q.get_nowait()
             self.chains[cid] = chain
             self.current_nodes[cid] = node
+        while not aborted_q.empty():
+            aborted_q.get_nowait()
+
+        if len(self.chains) < target_chain_count:
+            raise RuntimeError(
+                "Rollout infra failures exceeded resample budget: "
+                f"valid={len(self.chains)} target={target_chain_count} "
+                f"resample_attempts={resample_attempts} max_resample_attempts={max_resample_attempts}"
+            )
 
         self.global_step += 1
         self.monitor_step()
@@ -452,6 +553,7 @@ class ChainRollout:
         max_turns: int,
         generation_config: Dict[str, Any],
         done_queue: asyncio.Queue,
+        aborted_queue: asyncio.Queue,
         enable_streaming: bool = False,
     ):
         """
@@ -568,6 +670,23 @@ class ChainRollout:
                             have_set_tools,
                             enable_streaming,
                         )
+                    except RolloutInfraError as exc:
+                        chain.info["rollout_aborted"] = True
+                        chain.info["rollout_abort_reason"] = str(exc)
+                        chain.info["rollout_abort_type"] = type(exc).__name__
+                        self.aborted_chains_count += 1
+                        self._diag_log(
+                            "rollout_abort",
+                            event_kind="failure",
+                            chain_id=chain_id,
+                            group_id=group_id,
+                            depth=depth,
+                            tool_name=tool_call["function"]["name"],
+                            extra={"error": str(exc)},
+                        )
+                        await self.release_resources(chain_id, success=False)
+                        await aborted_queue.put((chain_id, chain, current_node))
+                        return
                     except Exception as exc:  # noqa: BLE001
                         timeout_s = getattr(self, "chain_tool_timeout_s", None)
                         tool_name = tool_call["function"]["name"]
@@ -632,6 +751,15 @@ class ChainRollout:
                     action_input_node.is_terminal = (
                         result["status"] in self.terminal_status
                     )
+                    if not action_input_node.is_terminal:
+                        self._apply_reward_early_termination(
+                            action_input_node,
+                            chain_id=chain_id,
+                            group_id=group_id,
+                            depth=depth,
+                        )
+                    if action_input_node.is_terminal:
+                        break
             else:
                 # No tool calls, chain is finished
                 break
@@ -1075,15 +1203,20 @@ class ChainRollout:
 
         await self.release_resources(chain_id)
 
-    async def release_resources(self, id: str) -> None:
+    async def release_resources(self, id: str, success: bool = True) -> None:
         for tool in self.tools:
-            await tool.release(id=id)
+            await tool.release(id=id, success=success)
         if self._reward_fn is not None:
-            await self._reward_fn.release(id=id)
+            await self._reward_fn.release(id=id, success=success)
 
     async def set_tools(self, id: str, env_args: Dict[str, Any]) -> None:
         for tool in self.tools:
-            await tool.set_env(id, env_args)
+            try:
+                await tool.set_env(id, env_args)
+            except Exception as exc:
+                raise RolloutInfraError(
+                    f"environment setup failed for tool '{tool.name}': {type(exc).__name__}: {exc}"
+                ) from exc
 
     def monitor_step(self) -> None:
         messages = self.get_messages()

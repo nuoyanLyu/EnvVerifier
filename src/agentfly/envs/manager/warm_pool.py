@@ -64,6 +64,17 @@ class WarmPool(Generic[T]):
         #     # print(f"[WarmPool] Warning: Env {env} already in pool, skipping release")
         #     return
 
+        if not finished:
+            try:
+                await env.aclose()
+            except Exception:
+                pass
+            await self._spawn()
+            return
+
+        if getattr(env, "close_on_release", False):
+            await env.aclose()
+
         # We don't reset the env during release, and leave this to the user
         # if finished:
         #     await self.reset(env)
