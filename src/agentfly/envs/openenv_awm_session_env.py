@@ -121,7 +121,11 @@ class OpenEnvAWMSessionRuntime:
             self._tools_text_cache = text.replace("awm_call_tool", "call_tool")
         return self._tools_text_cache
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | str | None) -> str:
+    async def call_tool_with_details(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | str | None,
+    ) -> dict[str, Any]:
         normalized_args = parse_jsonish_arguments(arguments)
         result = await self._request(
             {
@@ -134,12 +138,27 @@ class OpenEnvAWMSessionRuntime:
             }
         )
         obs = self._observation(result)
-        if obs.get("error"):
-            return f"Error: {obs.get('error')}"
-        tool_result = obs.get("tool_result")
-        if isinstance(tool_result, str):
-            return tool_result
-        return json.dumps(tool_result, ensure_ascii=False, default=str)
+        error = obs.get("error")
+        if error:
+            observation = f"Error: {error}"
+        else:
+            tool_result = obs.get("tool_result")
+            if isinstance(tool_result, str):
+                observation = tool_result
+            else:
+                observation = json.dumps(tool_result, ensure_ascii=False, default=str)
+        return {
+            "observation": observation,
+            "openenv_reward_type": obs.get("reward_type"),
+            "openenv_reward": result.get("reward"),
+            "openenv_error": error,
+            "openenv_tool_name": obs.get("tool_name") or tool_name,
+            "openenv_observation": obs,
+        }
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any] | str | None) -> str:
+        details = await self.call_tool_with_details(tool_name, arguments)
+        return str(details["observation"])
 
     async def run_verifier(self, final_answer: str | None = None) -> tuple[str, dict[str, Any]]:
         args: dict[str, Any] = {"verifier_mode": self.config.verifier_mode}
@@ -335,6 +354,21 @@ class OpenEnvAWMSessionEnv(BaseEnv):
         if self.runtime is None:
             return "Error: OpenEnv AWM session is not initialized."
         return await self.runtime.call_tool(tool_name, arguments)
+
+    async def call_tool_with_details(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | str | None,
+    ) -> dict[str, Any]:
+        if self.runtime is None:
+            return {
+                "observation": "Error: OpenEnv AWM session is not initialized.",
+                "openenv_reward_type": "server_error",
+                "openenv_error": "OpenEnv AWM session is not initialized.",
+                "openenv_tool_name": tool_name,
+                "openenv_observation": {},
+            }
+        return await self.runtime.call_tool_with_details(tool_name, arguments)
 
     async def run_verifier(self, final_answer: str | None = None) -> tuple[str, dict[str, Any]]:
         if self.runtime is None:

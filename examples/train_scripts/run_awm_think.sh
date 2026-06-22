@@ -10,10 +10,11 @@ export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export AGENTFLY_OPENENV_AWM_BASE_URL="${AGENTFLY_OPENENV_AWM_BASE_URL:-http://127.0.0.1:8899}"
 export AGENTFLY_OPENENV_AWM_VERIFIER_MODE="${AGENTFLY_OPENENV_AWM_VERIFIER_MODE:-${OPENENV_AWM_VERIFIER_MODE:-code}}"
 export AGENTFLY_OPENENV_AWM_KEEP_SESSION="${AGENTFLY_OPENENV_AWM_KEEP_SESSION:-0}"
+export AGENTFLY_OPENENV_AWM_POOL_SIZE="${AGENTFLY_OPENENV_AWM_POOL_SIZE:-32}"
 
 MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
-TRAIN_DATASET="${TRAIN_DATASET:-${REPO_ROOT}/data/awm/awm_train.json}"
-VAL_DATASET="${VAL_DATASET:-${TRAIN_DATASET}}"
+TRAIN_DATASET="${TRAIN_DATASET:-/data1/lvnuoyan/dataset/awm/awm_train.json}"
+VAL_DATASET="${VAL_DATASET:-/data1/lvnuoyan/dataset/awm/awm_val.json}"
 SYSTEM_PROMPT_CONFIG="${SYSTEM_PROMPT_CONFIG:-${REPO_ROOT}/src/agentfly/configs/prompts/system_prompt_openenv_awm_think.yaml}"
 
 N_GPUS="${N_GPUS:-8}"
@@ -21,18 +22,19 @@ N_NODES="${N_NODES:-1}"
 RAY_PORT="${RAY_PORT:-6379}"
 START_RAY="${START_RAY:-1}"
 
-LR="${LR:-4e-7}"
+LR="${LR:-7e-7}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32000}"
 MAX_RESPONSE_TOKENS="${MAX_RESPONSE_TOKENS:-2048}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
-VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
-PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-128}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-64}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-2}"
 LOG_PROB_MICRO_BATCH_SIZE_PER_GPU="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-4}"
 TP_SIZE="${TP_SIZE:-2}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.5}"
 
-NUM_CHAINS="${NUM_CHAINS:-16}"
+ROLLOUT_N="${ROLLOUT_N:-1}"
+NUM_CHAINS="${NUM_CHAINS:-8}"
 MAX_TURNS="${MAX_TURNS:-20}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-200}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
@@ -45,6 +47,11 @@ ENTROPY_COEFF="${ENTROPY_COEFF:-0.0}"
 CLIP_RATIO_LOW="${CLIP_RATIO_LOW:-0.2}"
 CLIP_RATIO_HIGH="${CLIP_RATIO_HIGH:-0.28}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
+VAL_TEMPERATURE="${VAL_TEMPERATURE:-0.6}"
+VAL_TOP_K="${VAL_TOP_K:-20}"
+VAL_TOP_P="${VAL_TOP_P:-0.95}"
+VAL_DO_SAMPLE="${VAL_DO_SAMPLE:-True}"
+VAL_N="${VAL_N:-1}"
 
 PROJECT_NAME="${PROJECT_NAME:-AgentFly-OpenEnv-AWM-Think}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-qwen25-openenv-awm-think-grpo}"
@@ -95,6 +102,12 @@ python -m agentfly.cli train \
   actor_rollout_ref.rollout.tensor_model_parallel_size="${TP_SIZE}" \
   actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.temperature="${TEMPERATURE}" \
+  actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
+  actor_rollout_ref.rollout.val_kwargs.temperature="${VAL_TEMPERATURE}" \
+  actor_rollout_ref.rollout.val_kwargs.top_k="${VAL_TOP_K}" \
+  actor_rollout_ref.rollout.val_kwargs.top_p="${VAL_TOP_P}" \
+  actor_rollout_ref.rollout.val_kwargs.do_sample="${VAL_DO_SAMPLE}" \
+  actor_rollout_ref.rollout.val_kwargs.n="${VAL_N}" \
   actor_rollout_ref.rollout.gpu_memory_utilization="${GPU_MEMORY_UTILIZATION}" \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${LOG_PROB_MICRO_BATCH_SIZE_PER_GPU}" \
   actor_rollout_ref.ref.fsdp_config.param_offload=True \

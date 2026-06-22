@@ -100,7 +100,41 @@ def _extract_mcp_tool_names(list_tools_observation: str) -> set[str]:
     return names
 
 
-def _classify_error_observation(observation: str) -> str | None:
+OPENENV_FORMAT_ERROR_REWARD_TYPES = {"tool_not_found", "invalid_args", "invalid_action"}
+OPENENV_SERVER_ERROR_REWARD_TYPES = {"server_error", "timeout", "reset_error"}
+OPENENV_NON_ERROR_REWARD_TYPES = {
+    "tool_call_ok",
+    "reset_ok",
+    "reset_warning",
+    "episode_done",
+    "complete",
+    "incomplete",
+    "others",
+}
+
+
+def _openenv_reward_type_from_metadata(metadata: dict[str, Any] | None) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    reward_type = metadata.get("openenv_reward_type") or metadata.get("reward_type")
+    if reward_type is None:
+        observation = metadata.get("openenv_observation")
+        if isinstance(observation, dict):
+            reward_type = observation.get("reward_type")
+    if reward_type is None:
+        return None
+    return str(reward_type).strip().lower() or None
+
+
+def _classify_error_observation(observation: str, metadata: dict[str, Any] | None = None) -> str | None:
+    openenv_reward_type = _openenv_reward_type_from_metadata(metadata)
+    if openenv_reward_type in OPENENV_FORMAT_ERROR_REWARD_TYPES:
+        return "format_error"
+    if openenv_reward_type in OPENENV_SERVER_ERROR_REWARD_TYPES:
+        return "server_error"
+    if openenv_reward_type in OPENENV_NON_ERROR_REWARD_TYPES:
+        return None
+
     lowered = observation.lower()
     if not re.search(r"^\s*error\s*:", lowered):
         return None
@@ -140,11 +174,29 @@ def _collect_tool_calls_and_observations(
     return calls, observations
 
 
+def _tool_message_metadata(message: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    info = message.get("info")
+    if isinstance(info, dict):
+        metadata.update(info)
+    for key in (
+        "openenv_reward_type",
+        "openenv_reward",
+        "openenv_error",
+        "openenv_tool_name",
+        "openenv_observation",
+        "reward_type",
+    ):
+        if key in message:
+            metadata[key] = message[key]
+    return metadata
+
+
 def _collect_raw_tool_calls_and_observations(
     trajectory: list[dict[str, Any]],
-) -> tuple[list[str], list[str], str | None]:
+) -> tuple[list[str], list[tuple[str, dict[str, Any]]], str | None]:
     raw_calls: list[str] = []
-    observations: list[str] = []
+    observations: list[tuple[str, dict[str, Any]]] = []
     for index, message in enumerate(trajectory):
         if message.get("role") == "assistant":
             text = extract_text_from_message(message)
@@ -154,7 +206,7 @@ def _collect_raw_tool_calls_and_observations(
                 return [], observations, f"assistant_message_{index}_malformed_tool_call_json"
             raw_calls.extend(matches)
         elif message.get("role") == "tool":
-            observations.append(extract_text_from_message(message))
+            observations.append((extract_text_from_message(message), _tool_message_metadata(message)))
     return raw_calls, observations, None
 
 
@@ -224,7 +276,7 @@ def _validate_format_and_server(
             "valid_think": valid_think,
         }
 
-    available_mcp_tools = _extract_mcp_tool_names(observations[0]) if observations else set()
+    available_mcp_tools = _extract_mcp_tool_names(observations[0][0]) if observations else set()
     for index, (name, arguments) in enumerate(native_calls):
         if name != "call_tool":
             continue
@@ -263,8 +315,8 @@ def _validate_format_and_server(
             "valid_think": valid_think,
         }
 
-    for observation in observations[: len(native_calls)]:
-        error_classification = _classify_error_observation(observation)
+    for observation, metadata in observations[: len(native_calls)]:
+        error_classification = _classify_error_observation(observation, metadata)
         if error_classification is not None:
             reason = (
                 "tool_call_format_error_server_response"

@@ -40,6 +40,7 @@ def test_openenv_awm_runtime_payloads(monkeypatch):
             },
         },
         {"type": "observation", "data": {"observation": {"reward_type": "tool_call_ok", "tool_result": "categories"}}},
+        {"type": "observation", "data": {"reward": 0.0, "observation": {"reward_type": "tool_call_ok", "tool_result": "categories"}}},
         {
             "type": "observation",
             "data": {
@@ -75,6 +76,11 @@ def test_openenv_awm_runtime_payloads(monkeypatch):
         result = await env.call_tool("list_product_categories", {})
         assert result == "categories"
 
+        details = await env.call_tool_with_details("list_product_categories", {})
+        assert details["observation"] == "categories"
+        assert details["openenv_reward_type"] == "tool_call_ok"
+        assert details["openenv_observation"]["reward_type"] == "tool_call_ok"
+
         verifier_result, verifier_details = await env.run_verifier("done")
         assert verifier_result == "incomplete"
         assert verifier_details["reward"] == 0.1
@@ -101,11 +107,19 @@ def test_openenv_awm_runtime_payloads(monkeypatch):
         "type": "step",
         "data": {
             "type": "call_tool",
+            "tool_name": "list_product_categories",
+            "arguments": {},
+        },
+    }
+    assert fake_ws.sent[4] == {
+        "type": "step",
+        "data": {
+            "type": "call_tool",
             "tool_name": "verify",
             "arguments": {"verifier_mode": "code", "final_answer": "done"},
         },
     }
-    assert fake_ws.sent[4]["data"]["tool_name"] == "done"
+    assert fake_ws.sent[5]["data"]["tool_name"] == "done"
     assert fake_ws.closed is True
 
 

@@ -19,6 +19,16 @@ dependencies = [
     "tqdm>=4.67.3",
 ]
 
+[project.optional-dependencies]
+# `bench` extra installs the MCP-adapted benchmark harness from the
+# repository-level submodule at ../mcp-adapted-bench.
+bench = [
+    "mcp-adapted-bench",
+]
+
+[tool.uv.sources]
+mcp-adapted-bench = { path = "../mcp-adapted-bench", editable = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

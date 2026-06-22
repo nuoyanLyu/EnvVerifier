@@ -739,14 +739,15 @@ class ChainRollout:
                         image_base64 = image_to_data_uri(image)
                         new_content.append({"type": "image", "image": image_base64})
 
-                    newest_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "tool_name": result["name"],
-                            "content": new_content,
-                        }
-                    )
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "tool_name": result["name"],
+                        "content": new_content,
+                    }
+                    if result.get("info"):
+                        tool_message["info"] = result["info"]
+                    newest_messages.append(tool_message)
                     action_input_node.messages = newest_messages.copy()
                     action_input_node.is_terminal = (
                         result["status"] in self.terminal_status

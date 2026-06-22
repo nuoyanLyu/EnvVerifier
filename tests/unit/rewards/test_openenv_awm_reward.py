@@ -217,6 +217,50 @@ def test_openenv_awm_reward_format_error_still_penalized():
     assert result["format_error"] == 1.0
 
 
+
+def test_openenv_awm_reward_prefers_structured_tool_call_ok_over_error_text():
+    class OthersOpenEnv:
+        runtime = object()
+        current_config = SimpleNamespace(verifier_mode="code")
+
+        async def run_verifier(self, final_answer=None):
+            return "others", {
+                "reward": 0.0,
+                "verifier_mode": "code",
+                "verify_result": {"result": "others"},
+            }
+
+    trajectory = [
+        _assistant('<tool_call>{"name":"list_tools","arguments":null}</tool_call>'),
+        _tool("Available MCP tools (1 total):\n\n1. search_products\n   Parameters: None"),
+        _assistant(
+            '<tool_call>{"name":"call_tool","arguments":{"tool_name":"search_products","arguments":"{\\"query\\":\\"missing\\"}"}}</tool_call>'
+        ),
+        {
+            "role": "tool",
+            "content": "Error: no product matched the query; search failed",
+            "info": {
+                "openenv_reward_type": "tool_call_ok",
+                "openenv_error": None,
+                "openenv_observation": {"reward_type": "tool_call_ok"},
+            },
+        },
+    ]
+
+    async def run_case():
+        return await openenv_awm_verifier_reward._func(
+            final_response="done",
+            trajectory=trajectory,
+            env=OthersOpenEnv(),
+        )
+
+    result = asyncio.run(run_case())
+
+    assert result["classification"] == "incomplete"
+    assert result["reward"] == 0.0
+    assert result["server_error"] == 0.0
+    assert result["incomplete"] == 1.0
+
 def test_openenv_awm_reward_server_error_returns_zero_without_verifier():
     class ShouldNotVerifyOpenEnv:
         runtime = object()

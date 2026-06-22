@@ -1,5 +1,11 @@
+import os
+from typing import Any
+
 from ....envs.openenv_awm_session_env import OpenEnvAWMSessionEnv
 from ...decorator import tool
+
+
+OPENENV_AWM_POOL_SIZE = int(os.getenv("AGENTFLY_OPENENV_AWM_POOL_SIZE", "32"))
 
 
 @tool(
@@ -10,7 +16,7 @@ from ...decorator import tool
         "Use this near the start of the task before calling openenv_awm_call_tool."
     ),
     stateful=True,
-    pool_size=8,
+    pool_size=OPENENV_AWM_POOL_SIZE,
 )
 async def openenv_awm_list_tools(env: OpenEnvAWMSessionEnv) -> str:
     """
@@ -30,7 +36,7 @@ async def openenv_awm_list_tools(env: OpenEnvAWMSessionEnv) -> str:
     name="list_tools",
     description="List all available MCP tools for the current environment.",
     stateful=True,
-    pool_size=8,
+    pool_size=OPENENV_AWM_POOL_SIZE,
 )
 async def list_tools(env: OpenEnvAWMSessionEnv) -> str:
     """
@@ -53,13 +59,13 @@ async def list_tools(env: OpenEnvAWMSessionEnv) -> str:
         "Pass the tool_name exactly as returned by openenv_awm_list_tools and provide arguments as a JSON string."
     ),
     stateful=True,
-    pool_size=8,
+    pool_size=OPENENV_AWM_POOL_SIZE,
 )
 async def openenv_awm_call_tool(
     tool_name: str,
     arguments: str,
     env: OpenEnvAWMSessionEnv,
-) -> str:
+) -> dict[str, Any]:
     """
     Call one MCP tool inside the current OpenEnv AWM episode.
 
@@ -69,9 +75,9 @@ async def openenv_awm_call_tool(
         env: The active OpenEnv AWM session environment.
 
     Returns:
-        The text observation returned by the MCP tool.
+        A tool response dict containing the text observation plus OpenEnv metadata.
     """
-    return await env.call_tool(tool_name, arguments)
+    return await env.call_tool_with_details(tool_name, arguments)
 
 
 @tool(
@@ -79,7 +85,7 @@ async def openenv_awm_call_tool(
     name="call_tool",
     description="Call a MCP environment-specific tool. Pass arguments as a valid JSON string.",
     stateful=True,
-    pool_size=8,
+    pool_size=OPENENV_AWM_POOL_SIZE,
 )
 async def call_tool(
     tool_name: str,
@@ -95,6 +101,6 @@ async def call_tool(
         env: The active OpenEnv AWM session environment.
 
     Returns:
-        The text observation returned by the MCP tool.
+        A tool response dict containing the text observation plus OpenEnv metadata.
     """
-    return await env.call_tool(tool_name, arguments)
+    return await env.call_tool_with_details(tool_name, arguments)

@@ -454,6 +454,10 @@ class AsyncVerlBackend(LLMBackend):
 
         if "temperature" in kwargs:
             generation_config["temperature"] = kwargs["temperature"]
+        if "top_k" in kwargs:
+            generation_config["top_k"] = kwargs["top_k"]
+        if "top_p" in kwargs:
+            generation_config["top_p"] = kwargs["top_p"]
         if "n" in kwargs:
             generation_config["n"] = kwargs["n"]
         if "max_tokens" in kwargs:

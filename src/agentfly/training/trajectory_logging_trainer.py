@@ -256,12 +256,22 @@ class TrajectoryLoggingRayPPOTrainer(RayPPOTrainer):
                 raise NotImplementedError("Validation trajectory logging currently expects async rollout mode.")
             else:
                 self.agent_wrapper.set_llm_engine(self.async_rollout_manager, self.tokenizer, self.processor)
+                val_generation_config = dict(self.config.agent.generation_config)
+                val_kwargs = self.config.actor_rollout_ref.rollout.val_kwargs
+                val_generation_config.update(
+                    {
+                        "temperature": val_kwargs.temperature,
+                        "top_k": val_kwargs.top_k,
+                        "top_p": val_kwargs.top_p,
+                        "n": 1,
+                    }
+                )
                 self.run_on_bg(
                     self.agent_wrapper.run(
                         max_turns=self.config.agent.max_turns,
                         messages=test_gen_batch_padded.non_tensor_batch["messages"],
                         num_chains=1,
-                        generation_config=self.config.agent.generation_config,
+                        generation_config=val_generation_config,
                     )
                 )
                 test_output_gen_batch_padded = self.agent_wrapper.get_verl_data_proto()

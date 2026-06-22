@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from typing import Any
 
@@ -29,6 +30,7 @@ OPENENV_REWARD_CLASSIFICATIONS = {
     "server_error",
     "judge_error",
 }
+OPENENV_AWM_REWARD_POOL_SIZE = int(os.getenv("AGENTFLY_OPENENV_AWM_POOL_SIZE", "32"))
 
 
 def _classification_from_openenv_verifier(verifier_result: Any) -> str:
@@ -170,7 +172,7 @@ def _build_openenv_reward_payload(
     return payload
 
 
-@reward(name="openenv_awm_verifier_reward", env_cls=OpenEnvAWMSessionEnv, pool_size=8)
+@reward(name="openenv_awm_verifier_reward", env_cls=OpenEnvAWMSessionEnv, pool_size=OPENENV_AWM_REWARD_POOL_SIZE)
 async def openenv_awm_verifier_reward(
     final_response: str,
     trajectory: list[dict[str, Any]],
@@ -212,7 +214,7 @@ async def openenv_awm_verifier_reward(
     )
 
 
-@reward(name="openenv_awm_verifier_reward_think", env_cls=OpenEnvAWMSessionEnv, pool_size=8)
+@reward(name="openenv_awm_verifier_reward_think", env_cls=OpenEnvAWMSessionEnv, pool_size=OPENENV_AWM_REWARD_POOL_SIZE)
 async def openenv_awm_verifier_reward_think(
     final_response: str,
     trajectory: list[dict[str, Any]],
